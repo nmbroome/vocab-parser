@@ -3981,6 +3981,557 @@ components:
           readOnly: true
           description: Human-readable description of what the simulation did.
 
+    # ========================================================================
+    # Aggregator API (Decision 19, 26, 27, 28)
+    # ========================================================================
+
+    # --- Auth ---
+    AggregatorTokenRequest:
+      type: object
+      required: [instance_id]
+      description: |
+        Request a short-lived JWT for aggregator API access. The transport
+        layer is secured by mTLS — this JWT provides application-level identity
+        scoped to a specific fintech instance.
+      properties:
+        instance_id:
+          type: string
+          description: The fintech instance requesting authentication.
+
+    AggregatorToken:
+      type: object
+      readOnly: true
+      required: [access_token, token_type, expires_in, instance_id]
+      properties:
+        access_token:
+          type: string
+          readOnly: true
+          description: Short-lived JWT.
+        token_type:
+          type: string
+          readOnly: true
+          const: Bearer
+        expires_in:
+          type: integer
+          readOnly: true
+          description: Token lifetime in seconds (3600 = 1 hour).
+        instance_id:
+          type: string
+          readOnly: true
+          description: The instance this token is scoped to.
+
+    # --- FBO Position ---
+    FboPosition:
+      type: object
+      readOnly: true
+      description: |
+        FBO position for a fintech instance, maintained by the Payment Hub
+        consumer. This is the data the Origination API queries at step 1
+        of the payment origination flow (Decision 28).
+      required:
+        - instance_id
+        - balance
+        - held_amount
+        - available_balance
+        - last_event_sequence
+        - updated_at
+      properties:
+        instance_id:
+          type: string
+          readOnly: true
+        balance:
+          type: integer
+          format: int64
+          readOnly: true
+          description: |
+            Current FBO balance for this instance (cents). Sum of all settled
+            inbound minus all settled outbound for this instance's accounts.
+        held_amount:
+          type: integer
+          format: int64
+          readOnly: true
+          description: |
+            Amount currently reserved for pending outbound payments (cents).
+            Held via the reserve saga pattern (Decision 28, step 4).
+        available_balance:
+          type: integer
+          format: int64
+          readOnly: true
+          description: |
+            Effective available balance (cents). Computed as `balance - held_amount`.
+            This is the amount the Origination API checks against when approving
+            new outbound payments.
+        last_event_sequence:
+          type: integer
+          format: int64
+          readOnly: true
+          description: |
+            The sequence_id of the most recent event processed by the Payment Hub
+            consumer for this instance. Used for staleness detection.
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    # --- Payment Origination Request ---
+    OriginateAchRequest:
+      type: object
+      required:
+        - instance_id
+        - account_number
+        - amount
+        - direction
+        - counterparty
+      properties:
+        instance_id:
+          type: string
+          description: The fintech instance originating the payment.
+        account_number:
+          type: string
+          pattern: '^\d{12}$'
+          description: The 12-digit account number for this payment.
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Payment amount in cents.
+        direction:
+          $ref: "#/components/schemas/AchDirection"
+        counterparty:
+          $ref: "#/components/schemas/AchCounterparty"
+        window:
+          $ref: "#/components/schemas/AchWindow"
+        entity_hash:
+          type: string
+          description: |
+            Hashed entity identifier for BSA clearance check (Decision 28, step 2).
+            The aggregator uses this to query bsa_alerts for blocking alerts
+            without needing full PII in the origination request.
+
+    OriginateWireRequest:
+      type: object
+      required:
+        - instance_id
+        - account_number
+        - amount
+        - beneficiary
+      properties:
+        instance_id:
+          type: string
+        account_number:
+          type: string
+          pattern: '^\d{12}$'
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+        beneficiary:
+          $ref: "#/components/schemas/WireBeneficiary"
+        purpose:
+          type: string
+          maxLength: 140
+        entity_hash:
+          type: string
+
+    # --- Wire Prepare/Confirm (explicit two-phase for large wires) ---
+    PrepareWireRequest:
+      type: object
+      required:
+        - instance_id
+        - account_number
+        - amount
+        - beneficiary
+      description: |
+        Phase 1 of the explicit prepare/confirm pattern for large wires
+        (Decision 19). Validates the payment, checks FBO position and BSA
+        clearance, and reserves funds — but does not submit to Fedwire.
+        Returns a preparation_id that must be confirmed within 15 minutes.
+      properties:
+        instance_id:
+          type: string
+        account_number:
+          type: string
+          pattern: '^\d{12}$'
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+        beneficiary:
+          $ref: "#/components/schemas/WireBeneficiary"
+        purpose:
+          type: string
+          maxLength: 140
+        entity_hash:
+          type: string
+
+    WirePreparation:
+      type: object
+      readOnly: true
+      required:
+        - preparation_id
+        - status
+        - amount
+        - expires_at
+      properties:
+        preparation_id:
+          type: string
+          readOnly: true
+          pattern: '^wireprep_[a-zA-Z0-9]{20}$'
+        status:
+          type: string
+          readOnly: true
+          enum: [reserved, confirmed, expired, canceled]
+          description: |
+            - `reserved` — Funds reserved, awaiting confirmation.
+            - `confirmed` — Confirmed and submitted to Fedwire.
+            - `expired` — Not confirmed within 15 minutes. Funds released.
+            - `canceled` — Explicitly canceled. Funds released.
+        instance_id:
+          type: string
+          readOnly: true
+        amount:
+          type: integer
+          format: int64
+          readOnly: true
+        beneficiary:
+          $ref: "#/components/schemas/WireBeneficiary"
+        wire_transfer_id:
+          type: string
+          readOnly: true
+          description: |
+            The resulting wire transfer ID. Only populated after confirmation
+            (status = confirmed).
+        expires_at:
+          type: string
+          format: date-time
+          readOnly: true
+          description: |
+            When this preparation expires if not confirmed. 15 minutes from
+            creation. After expiry, reserved funds are released automatically.
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    ConfirmWireRequest:
+      type: object
+      required: [preparation_id]
+      properties:
+        preparation_id:
+          type: string
+          description: The preparation to confirm and submit to Fedwire.
+
+    # --- RTP Origination ---
+    OriginateRtpRequest:
+      type: object
+      required:
+        - instance_id
+        - account_number
+        - amount
+        - counterparty
+      description: |
+        Originate a Real-Time Payment (RTP) via The Clearing House.
+        Same origination flow as ACH but settles in seconds.
+      properties:
+        instance_id:
+          type: string
+        account_number:
+          type: string
+          pattern: '^\d{12}$'
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 100000000
+          description: Amount in cents. RTP has a $1M per-transaction limit.
+        counterparty:
+          type: object
+          required: [routing_number, account_number, name]
+          properties:
+            routing_number:
+              type: string
+              pattern: '^\d{9}$'
+            account_number:
+              type: string
+              maxLength: 34
+            name:
+              type: string
+              maxLength: 140
+        entity_hash:
+          type: string
+        message:
+          type: string
+          maxLength: 140
+          description: Remittance message to the beneficiary.
+
+    # --- Payment Origination Result ---
+    OriginationResult:
+      type: object
+      readOnly: true
+      description: |
+        Result of a payment origination request. Returned immediately — the
+        payment settles asynchronously. The instance receives status updates
+        via webhook push (with pull fallback).
+      required: [origination_id, status, instance_id, amount]
+      properties:
+        origination_id:
+          type: string
+          readOnly: true
+          pattern: '^orig_[a-zA-Z0-9]{20}$'
+        status:
+          type: string
+          readOnly: true
+          enum: [pending, submitted, rejected, stale_consumer]
+          description: |
+            - `pending` — Accepted, funds reserved, queued for submission.
+            - `submitted` — Submitted to Fed / payment network.
+            - `rejected` — FBO insufficient, BSA block, or validation failure.
+            - `stale_consumer` — Payment Hub or BSA Approver cursor is stale
+              (Decision 28, step 3). Retry after consumer catches up.
+        instance_id:
+          type: string
+          readOnly: true
+        amount:
+          type: integer
+          format: int64
+          readOnly: true
+        rejection_reason:
+          type: string
+          readOnly: true
+          description: |
+            Why the origination was rejected. Only present when status is
+            `rejected` or `stale_consumer`.
+        retry_after:
+          type: integer
+          readOnly: true
+          description: |
+            Seconds to wait before retrying. Only present when status is
+            `stale_consumer`. The instance should retry after this delay,
+            by which time the lagging consumer should have caught up.
+        fbo_position_after:
+          $ref: "#/components/schemas/FboPosition"
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    # --- Inbound Payment (routed to instance by aggregator) ---
+    InboundPayment:
+      type: object
+      readOnly: true
+      description: |
+        An inbound payment routed to this instance by the aggregator based on
+        account number prefix. The instance retrieves these via pull fallback
+        when webhook delivery from the aggregator has failed.
+      required:
+        - id
+        - payment_type
+        - account_number
+        - amount
+        - status
+        - received_at
+      properties:
+        id:
+          type: string
+          readOnly: true
+          pattern: '^inb_[a-zA-Z0-9]{20}$'
+        payment_type:
+          type: string
+          readOnly: true
+          enum: [ach_credit, ach_debit, wire, rtp]
+        account_number:
+          type: string
+          readOnly: true
+          description: The 12-digit account number this payment was routed to.
+        amount:
+          type: integer
+          format: int64
+          readOnly: true
+        currency:
+          type: string
+          readOnly: true
+          const: USD
+        status:
+          type: string
+          readOnly: true
+          enum: [pending, delivered, acknowledged]
+          description: |
+            - `pending` — Aggregator has the payment, not yet pushed to instance.
+            - `delivered` — Pushed to instance via webhook.
+            - `acknowledged` — Instance confirmed receipt.
+        originator:
+          type: object
+          readOnly: true
+          properties:
+            name:
+              type: string
+            routing_number:
+              type: string
+            account_number:
+              type: string
+        reference:
+          type: string
+          readOnly: true
+          description: Originator reference or trace number.
+        received_at:
+          type: string
+          format: date-time
+          readOnly: true
+          description: When the aggregator received this payment from the Fed.
+
+    InboundPaymentList:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboundPayment"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    # --- BSA Alert (aggregator-level, cross-fintech) ---
+    BsaAlertType:
+      type: string
+      enum:
+        - ctr_threshold
+        - structuring_suspected
+        - cross_fintech_activity
+        - sar_candidate
+        - velocity_anomaly
+        - watchlist_hit
+      description: |
+        Type of BSA alert generated by the BSA Approver (real-time) or
+        BSA Reporter (scheduled).
+
+    BsaAlertStatus:
+      type: string
+      enum: [open, under_review, escalated, cleared, block]
+      description: |
+        BSA alert lifecycle.
+        - `open` — New alert, not yet reviewed.
+        - `under_review` — Analyst is investigating.
+        - `escalated` — Elevated to SAR candidate or compliance officer.
+        - `cleared` — Reviewed and determined to be non-suspicious.
+        - `block` — Entity is blocked from payment origination. The Origination
+          API checks for `block` status at step 2 of the origination flow.
+
+    BsaAlert:
+      type: object
+      readOnly: true
+      required:
+        - alert_id
+        - event_id
+        - alert_type
+        - entity_hash
+        - status
+        - created_at
+      properties:
+        alert_id:
+          type: string
+          readOnly: true
+        event_id:
+          type: string
+          readOnly: true
+          description: The event that triggered this alert.
+        alert_type:
+          $ref: "#/components/schemas/BsaAlertType"
+        entity_hash:
+          type: string
+          readOnly: true
+          description: |
+            Hashed entity identifier (SSN/EIN hash). Used for per-entity
+            lookups without exposing PII in the alert table.
+        instance_id:
+          type: string
+          readOnly: true
+          description: |
+            The fintech instance where the triggering event originated.
+            For cross-fintech alerts, this is the instance of the most
+            recent triggering event.
+        status:
+          $ref: "#/components/schemas/BsaAlertStatus"
+        requires_lookback:
+          type: boolean
+          readOnly: true
+          description: |
+            Whether the BSA Reporter should run a deep historical analysis
+            on this alert. Set by the BSA Approver when it detects patterns
+            that need 90-day lookback.
+        details:
+          type: object
+          readOnly: true
+          description: |
+            Alert-specific details. Structure varies by alert_type.
+            Examples: transaction amounts, pattern description, matched
+            entity information for cross-fintech hits.
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    BsaAlertList:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/BsaAlert"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    # --- Consumer Health ---
+    ConsumerHealth:
+      type: object
+      readOnly: true
+      description: |
+        Health status of the four aggregator consumers (Decision 27).
+        The Origination API checks Payment Hub and BSA Approver freshness
+        at step 3 before approving any payment.
+      required: [consumers, all_healthy]
+      properties:
+        consumers:
+          type: array
+          readOnly: true
+          items:
+            type: object
+            properties:
+              consumer_name:
+                type: string
+                enum: [payment_hub, bsa_approver, bsa_reporter, 5300_reporter]
+              last_sequence_id:
+                type: integer
+                format: int64
+                description: Last event sequence processed by this consumer.
+              last_processed_at:
+                type: string
+                format: date-time
+                description: When this consumer last advanced its cursor.
+              status:
+                type: string
+                enum: [running, stale, stopped]
+                description: |
+                  - `running` — Consumer is current (processed within 60 seconds).
+                  - `stale` — Consumer has not processed in > 60 seconds.
+                  - `stopped` — Consumer is explicitly stopped.
+              lag:
+                type: integer
+                format: int64
+                description: |
+                  Number of unprocessed events (max sequence_id minus consumer cursor).
+                  High lag indicates the consumer is falling behind.
+        all_healthy:
+          type: boolean
+          readOnly: true
+          description: |
+            True only if all four consumers are in `running` status. When false,
+            the Origination API may reject payment requests for safety.
+        checked_at:
+          type: string
+          format: date-time
+          readOnly: true
+
 # ============================================================================
 # Paths — Entity
 # ============================================================================
@@ -7483,6 +8034,597 @@ paths:
                 $ref: "#/components/schemas/SandboxSimulationResult"
         "400":
           description: "`confirm` must be `true`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ==========================================================================
+  # Paths — Aggregator API
+  # ==========================================================================
+
+  # --------------------------------------------------------------------------
+  # Aggregator — Auth
+  # --------------------------------------------------------------------------
+  /auth/token:
+    post:
+      operationId: createAggregatorToken
+      summary: Obtain an aggregator access token
+      description: |
+        Authenticates a fintech instance and returns a short-lived JWT (1-hour
+        expiry) for aggregator API access. The transport layer must use mTLS —
+        this endpoint validates the client certificate and issues an
+        application-level token scoped to the instance.
+
+        Tokens are stateless JWTs — the aggregator does not maintain session state.
+        Instances should request a new token before the current one expires
+        (check the `expires_in` field).
+      tags: [Aggregator — Auth]
+      security:
+        - AggregatorJWT: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AggregatorTokenRequest"
+      responses:
+        "200":
+          description: Token issued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AggregatorToken"
+        "401":
+          description: mTLS client certificate invalid or instance_id mismatch.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # --------------------------------------------------------------------------
+  # Aggregator — FBO
+  # --------------------------------------------------------------------------
+  /fbo/{instance_id}/position:
+    get:
+      operationId: getFboPosition
+      summary: Get FBO position for an instance
+      description: |
+        Returns the current FBO position for a fintech instance, as maintained
+        by the Payment Hub consumer. This is the data the Origination API
+        queries at step 1 of the payment origination flow.
+
+        The position includes `balance` (settled funds), `held_amount` (reserved
+        for pending outbound payments), and `available_balance` (balance minus
+        held). The `last_event_sequence` field indicates how current the position
+        is — compare against the events table to assess staleness.
+
+        Key invariant: `Sum(all instance FBO positions) == Fed Master Account balance`.
+      tags: [Aggregator — FBO]
+      security:
+        - AggregatorJWT: []
+      parameters:
+        - name: instance_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Current FBO position.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FboPosition"
+        "401":
+          description: Invalid or expired aggregator token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /fbo/{instance_id}/available-balance:
+    get:
+      operationId: getFboAvailableBalance
+      summary: Get available balance for an instance
+      description: |
+        Convenience endpoint that returns only the available balance (balance
+        minus held_amount) for a fintech instance. Lighter weight than the
+        full position endpoint for quick balance checks.
+      tags: [Aggregator — FBO]
+      security:
+        - AggregatorJWT: []
+      parameters:
+        - name: instance_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Available balance.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  instance_id:
+                    type: string
+                  available_balance:
+                    type: integer
+                    format: int64
+                    description: Available balance in cents (balance minus held_amount).
+                  as_of:
+                    type: string
+                    format: date-time
+        "401":
+          description: Invalid or expired aggregator token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # --------------------------------------------------------------------------
+  # Aggregator — Payment Origination
+  # --------------------------------------------------------------------------
+  /payments/ach/originate:
+    post:
+      operationId: originateAchPayment
+      summary: Originate an ACH payment
+      description: |
+        Originates an ACH payment through the aggregator. The Origination API
+        executes the 5-step flow from Decision 28:
+
+        1. **Check FBO position** — sufficient available balance?
+        2. **Check BSA clearance** — entity blocked or flagged?
+        3. **Check consumer freshness** — Payment Hub and BSA Approver current?
+        4. **Reserve funds** — atomic balance decrement + held_amount increment.
+        5. **Submit to Fed** — queue ACH file for next window.
+
+        Returns `pending` immediately. The instance receives status updates via
+        webhook push (24-hour retry with pull fallback).
+
+        If step 3 fails (consumer is stale), returns `stale_consumer` with a
+        `retry_after` value. The instance should back off and retry — the
+        Origination API will not approve payments against uncertain state.
+      tags: [Aggregator — Payments]
+      security:
+        - AggregatorJWT: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OriginateAchRequest"
+      responses:
+        "200":
+          description: |
+            Origination result. Check `status` field — `pending` means accepted,
+            `rejected` means denied, `stale_consumer` means retry later.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OriginationResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: Invalid or expired aggregator token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /payments/wire/originate:
+    post:
+      operationId: originateWirePayment
+      summary: Originate a wire payment
+      description: |
+        Originates a domestic Fedwire payment through the aggregator. Same
+        5-step flow as ACH origination. Uses the implicit reserve pattern —
+        funds are reserved atomically on approval.
+
+        For large wires requiring explicit two-phase commit, use
+        `POST /payments/wire/prepare` followed by `POST /payments/wire/confirm`.
+
+        Returns `pending` immediately. Wire completion is typically same-day.
+      tags: [Aggregator — Payments]
+      security:
+        - AggregatorJWT: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OriginateWireRequest"
+      responses:
+        "200":
+          description: Origination result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OriginationResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: Invalid or expired aggregator token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /payments/wire/prepare:
+    post:
+      operationId: prepareWirePayment
+      summary: Prepare a wire payment (phase 1 of 2)
+      description: |
+        Phase 1 of the explicit prepare/confirm pattern for large wires
+        (Decision 19). Validates the payment, checks FBO position and BSA
+        clearance, and reserves funds — but does not submit to Fedwire.
+
+        Returns a `preparation_id` that must be confirmed via
+        `POST /payments/wire/confirm` within 15 minutes. If not confirmed,
+        the preparation expires and reserved funds are released automatically.
+
+        Use this for wires that require additional internal approval (e.g.,
+        dual authorization for large amounts) before committing to Fedwire.
+      tags: [Aggregator — Payments]
+      security:
+        - AggregatorJWT: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PrepareWireRequest"
+      responses:
+        "200":
+          description: |
+            Wire preparation created. Funds reserved for 15 minutes.
+            Confirm via `POST /payments/wire/confirm` to submit to Fedwire.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WirePreparation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: Invalid or expired aggregator token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: Insufficient FBO balance, BSA block, or stale consumer.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /payments/wire/confirm:
+    post:
+      operationId: confirmWirePayment
+      summary: Confirm a prepared wire payment (phase 2 of 2)
+      description: |
+        Phase 2 of the prepare/confirm pattern. Confirms a previously prepared
+        wire and submits it to Fedwire. The preparation must be in `reserved`
+        status and not expired (within 15-minute window).
+
+        On success, the preparation moves to `confirmed` and the resulting
+        `wire_transfer_id` is populated. The wire then follows the normal
+        Fedwire lifecycle (submitted → completed).
+
+        If the preparation has expired, returns 409. The instance must
+        call `POST /payments/wire/prepare` again to create a new preparation.
+      tags: [Aggregator — Payments]
+      security:
+        - AggregatorJWT: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfirmWireRequest"
+      responses:
+        "200":
+          description: Wire confirmed and submitted to Fedwire.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WirePreparation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: Invalid or expired aggregator token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Preparation not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: Preparation has expired or was already confirmed/canceled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /payments/rtp/originate:
+    post:
+      operationId: originateRtpPayment
+      summary: Originate an RTP payment
+      description: |
+        Originates a Real-Time Payment via The Clearing House. Same 5-step
+        origination flow as ACH and wire. RTP settles in seconds (vs. hours
+        for ACH, minutes for wire).
+
+        RTP has a per-transaction limit of $1,000,000 (enforced by TCH).
+
+        Returns `pending` immediately. Settlement confirmation arrives via
+        webhook within seconds for successful payments.
+      tags: [Aggregator — Payments]
+      security:
+        - AggregatorJWT: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OriginateRtpRequest"
+      responses:
+        "200":
+          description: Origination result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OriginationResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: Invalid or expired aggregator token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  # --------------------------------------------------------------------------
+  # Aggregator — Inbound Payments
+  # --------------------------------------------------------------------------
+  /inbound/{instance_id}:
+    get:
+      operationId: listInboundPayments
+      summary: List inbound payments for an instance
+      description: |
+        Pull fallback for inbound payment delivery. When the aggregator's
+        webhook push to an instance fails (24-hour retry exhausted), the
+        instance can poll this endpoint to retrieve undelivered inbound payments.
+
+        Supports filtering by status and time range. The instance should
+        acknowledge receipt by calling the instance-level processing endpoint
+        (not part of the aggregator API — handled within the instance's BaaS API).
+
+        Under normal operation, this endpoint returns an empty list — all
+        inbound payments are delivered via webhook. This exists purely as a
+        reliability fallback per Decision 19.
+      tags: [Aggregator — Payments]
+      security:
+        - AggregatorJWT: []
+      parameters:
+        - name: instance_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/PaginationLimit"
+        - $ref: "#/components/parameters/PaginationAfter"
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, delivered, acknowledged]
+          description: Filter by delivery status. Use `pending` to find undelivered payments.
+        - name: received_after
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: received_before
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Paginated list of inbound payments.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboundPaymentList"
+        "401":
+          description: Invalid or expired aggregator token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # --------------------------------------------------------------------------
+  # Aggregator — BSA
+  # --------------------------------------------------------------------------
+  /bsa/alerts:
+    get:
+      operationId: listBsaAlerts
+      summary: List BSA alerts
+      description: |
+        Returns BSA alerts across all fintech instances. This is the
+        cross-fintech visibility that the aggregator provides per Decision 26.
+
+        Alerts are generated by the BSA Approver (real-time: CTR threshold,
+        structuring, cross-fintech activity) and escalated by the BSA Reporter
+        (scheduled: SAR candidates, 90-day lookback results).
+
+        The Origination API checks alerts with `status: block` at step 2 of
+        the origination flow. Compliance officers use this endpoint for
+        case management and SAR preparation.
+
+        Requires compliance-scoped permissions on the aggregator token.
+      tags: [Aggregator — BSA]
+      security:
+        - AggregatorJWT: []
+      parameters:
+        - $ref: "#/components/parameters/PaginationLimit"
+        - $ref: "#/components/parameters/PaginationAfter"
+        - name: entity_hash
+          in: query
+          schema:
+            type: string
+          description: Filter by entity hash for per-entity alert history.
+        - name: instance_id
+          in: query
+          schema:
+            type: string
+          description: Filter by originating instance.
+        - name: alert_type
+          in: query
+          schema:
+            $ref: "#/components/schemas/BsaAlertType"
+          description: Filter by alert type.
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/BsaAlertStatus"
+          description: Filter by alert status.
+        - name: requires_lookback
+          in: query
+          schema:
+            type: boolean
+          description: Filter for alerts flagged for deep lookback analysis.
+      responses:
+        "200":
+          description: Paginated list of BSA alerts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BsaAlertList"
+        "401":
+          description: Invalid or expired aggregator token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: Token does not have compliance-scoped permissions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /bsa/alerts/{alert_id}:
+    get:
+      operationId: getBsaAlert
+      summary: Retrieve a BSA alert
+      description: |
+        Returns a single BSA alert with full details. The `details` field
+        contains alert-type-specific information (transaction amounts, pattern
+        descriptions, matched entity data for cross-fintech hits).
+      tags: [Aggregator — BSA]
+      security:
+        - AggregatorJWT: []
+      parameters:
+        - name: alert_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The BSA alert.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BsaAlert"
+        "401":
+          description: Invalid or expired aggregator token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: Token does not have compliance-scoped permissions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # --------------------------------------------------------------------------
+  # Aggregator — Consumer Health
+  # --------------------------------------------------------------------------
+  /consumers/health:
+    get:
+      operationId: getConsumerHealth
+      summary: Get aggregator consumer health
+      description: |
+        Returns the health status of all four aggregator consumers (Decision 27):
+        Payment Hub, BSA Approver, BSA Reporter, and 5300 Reporter.
+
+        Each consumer reports its cursor position, last processing time, status
+        (running/stale/stopped), and lag (unprocessed event count).
+
+        The `all_healthy` flag is true only when all consumers are current.
+        The Origination API checks Payment Hub and BSA Approver freshness
+        before approving payments — this endpoint provides the same visibility
+        to operations and monitoring.
+
+        **Monitoring thresholds (Decision 4):**
+        - Consumer stale if `last_processed_at` > 60 seconds ago.
+        - Consumer falling behind if lag > 1,000 events.
+        - Instance outbox stuck if no events from instance in > 5 minutes.
+      tags: [Aggregator — BSA]
+      security:
+        - AggregatorJWT: []
+      responses:
+        "200":
+          description: Consumer health status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsumerHealth"
+        "401":
+          description: Invalid or expired aggregator token.
           content:
             application/json:
               schema:
