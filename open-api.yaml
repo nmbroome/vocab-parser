@@ -2353,6 +2353,309 @@ components:
         pagination:
           $ref: "#/components/schemas/Pagination"
 
+    # ========================================================================
+    # KYC/KYB Verification (Decision 11)
+    # ========================================================================
+
+    # --- Enums ---
+    VerificationType:
+      type: string
+      enum: [kyc, kyb]
+      description: |
+        Whether this is identity verification for a person (KYC) or a
+        business (KYB). Trusts use KYB. Joint entities are verified through
+        their individual member persons (each gets a KYC verification).
+
+    VerificationProvider:
+      type: string
+      enum: [alloy, persona, socure, middesk, partner_provided]
+      description: |
+        The identity verification provider used for this check.
+        - `alloy`, `persona`, `socure`, `middesk` — Cassandra-managed providers.
+          The system routes to the configured provider for the partner's instance.
+        - `partner_provided` — The partner ran their own KYC/KYB and is submitting
+          an attestation. Trust level from partner configuration determines how
+          much of the partner's result Cassandra accepts.
+
+    VerificationStatus:
+      type: string
+      enum: [pending, in_review, approved, denied, expired]
+      description: |
+        Status of this individual verification attempt.
+        - `pending` — Verification submitted to provider, awaiting result.
+        - `in_review` — Provider flagged for manual review (e.g., document required).
+        - `approved` — Verification passed. Entity kyc_status updated to `approved`.
+        - `denied` — Verification failed. Entity kyc_status updated to `denied`.
+        - `expired` — Verification result has expired per CDD refresh policy
+          (typically 2 years for standard risk, 1 year for high risk).
+          Entity kyc_status updated to `expired`.
+
+    VerificationTrustLevel:
+      type: string
+      enum: [full, verify_watchlist_only]
+      description: |
+        Trust level for partner-provided verifications (from partner configuration).
+        - `full` — Cassandra trusts the partner's identity verification result
+          in full. OFAC screening still runs independently (compliance floor).
+        - `verify_watchlist_only` — Cassandra trusts the partner's identity data
+          but re-runs all watchlist and sanctions checks (OFAC, SDN, PEP).
+
+    # --- OFAC Screening Result (always runs, compliance floor) ---
+    OfacScreeningResult:
+      type: object
+      readOnly: true
+      description: |
+        Result of the mandatory OFAC screening. OFAC screening is a compliance
+        floor control (BA-05) and runs on every verification regardless of
+        provider or trust level. This cannot be disabled.
+      properties:
+        screened_at:
+          type: string
+          format: date-time
+          readOnly: true
+        match_status:
+          type: string
+          enum: [clear, potential_match, confirmed_match]
+          readOnly: true
+          description: |
+            - `clear` — No matches found on SDN, consolidated sanctions, or PEP lists.
+            - `potential_match` — Possible match requiring compliance officer review.
+              Entity is created with `lock_type: compliance` until resolved.
+            - `confirmed_match` — Confirmed SDN or sanctions list match. Entity blocked.
+        matched_lists:
+          type: array
+          readOnly: true
+          items:
+            type: string
+          description: |
+            Names of lists that returned matches (e.g., "SDN", "Consolidated Sanctions",
+            "PEP", "314a"). Empty array when match_status is `clear`.
+        match_score:
+          type: number
+          format: float
+          readOnly: true
+          minimum: 0
+          maximum: 100
+          description: |
+            Confidence score of the strongest match (0-100). Only meaningful when
+            match_status is `potential_match`. Used by compliance officers to
+            prioritize review.
+
+    # --- Provider Result (normalized from provider-specific response) ---
+    ProviderResult:
+      type: object
+      readOnly: true
+      description: |
+        Normalized verification result from the provider. Cassandra translates
+        each provider's native response into this common structure.
+      properties:
+        provider_reference:
+          type: string
+          readOnly: true
+          description: |
+            The provider's native reference ID for this verification
+            (e.g., Alloy evaluation_token, Persona inquiry_id).
+        provider_status:
+          type: string
+          readOnly: true
+          description: |
+            The provider's native status string, preserved for debugging.
+            Cassandra normalizes this into the verification's top-level `status`.
+        identity_verified:
+          type: boolean
+          readOnly: true
+          description: Whether the provider confirmed the identity matches the provided data.
+        document_verified:
+          type: boolean
+          readOnly: true
+          description: |
+            Whether identity documents were verified (if required by risk tier).
+            Null if document verification was not required.
+        risk_score:
+          type: number
+          format: float
+          readOnly: true
+          description: |
+            Provider's risk score, normalized to 0-100 range. Higher = riskier.
+            Used by CDD controls for risk tiering.
+        risk_signals:
+          type: array
+          readOnly: true
+          items:
+            type: string
+          description: |
+            Risk signal tags from the provider (e.g., "address_mismatch",
+            "ssn_issued_prior_to_dob", "high_risk_jurisdiction"). Used by
+            the control engine for enhanced due diligence triggers.
+        raw_response:
+          type: object
+          readOnly: true
+          description: |
+            The complete provider response, stored verbatim for audit purposes.
+            Only returned when the requesting token has compliance-scoped permissions.
+            Omitted in standard partner API responses.
+
+    # --- Verification (full response) ---
+    Verification:
+      type: object
+      required:
+        - id
+        - entity_id
+        - type
+        - provider
+        - status
+        - ofac_result
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          readOnly: true
+          pattern: '^ver_[a-zA-Z0-9]{20}$'
+          description: Unique verification identifier.
+          examples:
+            - ver_8kFb2mNqRsT9xLpW4vYz
+        entity_id:
+          type: string
+          description: The entity being verified.
+        type:
+          $ref: "#/components/schemas/VerificationType"
+        provider:
+          $ref: "#/components/schemas/VerificationProvider"
+        trust_level:
+          $ref: "#/components/schemas/VerificationTrustLevel"
+        status:
+          $ref: "#/components/schemas/VerificationStatus"
+        ofac_result:
+          $ref: "#/components/schemas/OfacScreeningResult"
+        provider_result:
+          $ref: "#/components/schemas/ProviderResult"
+        denial_reasons:
+          type: array
+          readOnly: true
+          items:
+            type: string
+          description: |
+            Machine-readable reasons for denial (e.g., "identity_not_verified",
+            "document_mismatch", "high_risk_jurisdiction", "ofac_match").
+            Only present when status is `denied`.
+        expires_at:
+          type: string
+          format: date-time
+          readOnly: true
+          description: |
+            When this verification result expires per CDD refresh policy.
+            After expiry, the entity's kyc_status transitions to `expired`
+            and a new verification is required. Expiry is risk-tier dependent
+            (2 years standard, 1 year high risk).
+        triggered_by:
+          type: string
+          readOnly: true
+          enum: [initial, cdd_refresh, information_change, manual]
+          description: |
+            What triggered this verification.
+            - `initial` — First-time verification on entity creation.
+            - `cdd_refresh` — Periodic re-verification per CDD policy (CD-06).
+            - `information_change` — Re-verification triggered by a material
+              change to the entity (e.g., name or address update).
+            - `manual` — Manually initiated by compliance officer or partner.
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    # --- Initiate Verification (Cassandra-managed provider) ---
+    InitiateVerification:
+      type: object
+      description: |
+        Initiates a verification using the instance's configured provider
+        (Alloy, Persona, Socure, or Middesk). The entity's PII is sent to
+        the provider automatically. OFAC screening runs in parallel.
+      properties:
+        triggered_by:
+          type: string
+          enum: [initial, cdd_refresh, information_change, manual]
+          default: initial
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+
+    # --- Submit Partner-Provided Attestation ---
+    SubmitPartnerAttestation:
+      type: object
+      required:
+        - provider_reference
+        - identity_verified
+      description: |
+        Submits a partner-provided KYC/KYB attestation. The partner has already
+        run their own verification and is attesting to the result.
+
+        Cassandra evaluates the attestation against the partner's configured
+        `trust_level`:
+        - `full` — The attestation is accepted. OFAC still runs independently.
+        - `verify_watchlist_only` — Identity attestation is accepted, but
+          Cassandra re-runs all watchlist and sanctions screening.
+
+        **OFAC screening always runs** regardless of trust level. If OFAC returns
+        a potential or confirmed match, the entity is locked even if the partner's
+        KYC passed.
+      properties:
+        provider_reference:
+          type: string
+          maxLength: 255
+          description: |
+            The partner's native reference ID for their verification
+            (e.g., their internal KYC case ID).
+        identity_verified:
+          type: boolean
+          description: Whether the partner's verification confirmed the identity.
+        document_verified:
+          type: boolean
+          description: Whether the partner verified identity documents.
+        risk_score:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 100
+          description: Optional risk score from the partner's verification.
+        risk_signals:
+          type: array
+          items:
+            type: string
+          description: Optional risk signals from the partner's verification.
+        triggered_by:
+          type: string
+          enum: [initial, cdd_refresh, information_change, manual]
+          default: initial
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+
+    # --- Verification List ---
+    VerificationList:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Verification"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
 # ============================================================================
 # Paths — Entity
 # ============================================================================
@@ -4137,3 +4440,263 @@ paths:
                 request_id: req_xyz789
                 resource_id: wire_4nRb7mKqWsT3xLpJ9vYz
                 resource_type: wire_transfer
+
+  # ==========================================================================
+  # Paths — KYC/KYB Verification
+  # ==========================================================================
+
+  /entities/{entity_id}/verifications:
+    get:
+      operationId: listVerifications
+      summary: List verifications for an entity
+      description: |
+        Returns all verification attempts for an entity, ordered by `created_at`
+        descending (most recent first). An entity may have multiple verifications
+        over its lifetime due to CDD refresh cycles, information changes, or
+        re-verification after denial.
+
+        The most recent `approved` verification (if any) is the one that determines
+        the entity's current `kyc_status`.
+      tags: [KYC Verifications]
+      parameters:
+        - name: entity_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/PaginationLimit"
+        - $ref: "#/components/parameters/PaginationAfter"
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/VerificationStatus"
+          description: Filter by verification status.
+        - name: provider
+          in: query
+          schema:
+            $ref: "#/components/schemas/VerificationProvider"
+          description: Filter by provider.
+      responses:
+        "200":
+          description: Paginated list of verifications.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VerificationList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+    post:
+      operationId: initiateVerification
+      summary: Initiate a verification
+      description: |
+        Initiates a KYC (person) or KYB (business/trust) verification using the
+        instance's configured provider. The entity's PII is sent to the provider
+        automatically — the partner does not need to provide identity data in
+        this request.
+
+        The verification type is inferred from the entity type:
+        - `person` → KYC
+        - `business`, `trust` → KYB
+        - `joint` → Not directly verifiable. Verify each member person individually.
+
+        **OFAC screening (BA-05) runs in parallel** with the provider verification.
+        Even if the provider approves the identity, an OFAC match will block the
+        entity with `lock_type: compliance`.
+
+        The entity's `kyc_status` is updated automatically based on the verification
+        outcome:
+        - Provider approved + OFAC clear → `kyc_status: approved`
+        - Provider denied → `kyc_status: denied`
+        - Provider pending / in review → `kyc_status: pending`
+
+        **Control gates:** CD-01 (CIP Data Collection), BA-05 (OFAC Screening).
+
+        **Events emitted:** `verification.initiated`, then `verification.approved`,
+        `verification.denied`, or `verification.in_review` when the provider responds.
+      tags: [KYC Verifications]
+      parameters:
+        - name: entity_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InitiateVerification"
+      responses:
+        "201":
+          description: |
+            Verification initiated. Status will be `pending` while awaiting
+            provider response. Monitor via webhooks or polling.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            Idempotent-Replayed:
+              $ref: "#/components/headers/Idempotent-Replayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Verification"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            Entity already has a verification in `pending` or `in_review` status.
+            Only one active verification is allowed at a time.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                status: 409
+                type: verification_already_pending
+                title: Verification Already Pending
+                detail: "Entity ent_abc123 already has a pending verification ver_xyz789. Wait for it to resolve before initiating another."
+                doc_url: "https://api.cassandra.bank/docs/errors/verification-already-pending"
+                request_id: req_abc123
+                resource_id: ent_abc123
+                resource_type: entity
+        "422":
+          description: |
+            Entity type is `joint` (verify members individually) or entity is
+            already in `archived` status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /entities/{entity_id}/verifications/attest:
+    post:
+      operationId: submitPartnerAttestation
+      summary: Submit a partner-provided KYC/KYB attestation
+      description: |
+        Submits a verification result from the partner's own KYC/KYB provider.
+        Only available when the partner's instance is configured with
+        `provider: partner_provided` in their KYC config.
+
+        The partner's attestation is evaluated against their configured trust level:
+
+        **trust_level: full**
+        The partner's identity verification is accepted as-is. Cassandra still
+        runs OFAC screening independently (compliance floor — cannot be disabled).
+        If the partner attests `identity_verified: true` and OFAC is clear, the
+        entity moves to `kyc_status: approved`.
+
+        **trust_level: verify_watchlist_only**
+        The partner's identity data is accepted, but Cassandra re-runs all
+        watchlist and sanctions screening (OFAC/SDN, PEP lists, FinCEN 314a).
+        The entity is only approved if both the partner's attestation AND
+        Cassandra's watchlist checks pass.
+
+        **OFAC always runs.** This is a compliance floor control (BA-05) and
+        cannot be bypassed regardless of trust level or partner configuration.
+
+        **Control gates:** BA-05 (OFAC), CD-01 (CIP completeness validation).
+
+        **Events emitted:** `verification.attestation_submitted`, then
+        `verification.approved` or `verification.denied`.
+      tags: [KYC Verifications]
+      parameters:
+        - name: entity_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitPartnerAttestation"
+      responses:
+        "201":
+          description: |
+            Attestation submitted and OFAC screening initiated. If OFAC screening
+            completes synchronously (typical), the response reflects the final
+            status. If OFAC requires manual review (potential match), status will
+            be `in_review`.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            Idempotent-Replayed:
+              $ref: "#/components/headers/Idempotent-Replayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Verification"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            Partner is not configured for partner-provided KYC. Use the standard
+            `POST /entities/{entity_id}/verifications` endpoint instead.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            Entity already has a verification in `pending` or `in_review` status,
+            or entity type is not compatible with attestation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /verifications/{verification_id}:
+    get:
+      operationId: getVerification
+      summary: Retrieve a verification
+      description: |
+        Returns a single verification by ID. Includes provider result, OFAC
+        screening result, and denial reasons (if applicable).
+
+        The `provider_result.raw_response` field is only included when the
+        requesting token has compliance-scoped permissions. Standard partner
+        tokens receive the normalized result only.
+      tags: [KYC Verifications]
+      parameters:
+        - name: verification_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The verification.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Verification"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
