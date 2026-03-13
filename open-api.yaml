@@ -1533,6 +1533,525 @@ components:
           maxLength: 500
           description: Required for all transitions. Recorded in audit log.
 
+    # ========================================================================
+    # ACH Transfer (Decision 7, 8)
+    # ========================================================================
+
+    # --- Enums ---
+    AchTransferStatus:
+      type: string
+      enum:
+        - pending_approval
+        - submitted
+        - settled
+        - returned
+        - rejected
+        - canceled
+      description: |
+        ACH transfer lifecycle state.
+        - `pending_approval` — Created, awaiting control engine evaluation.
+        - `submitted` — Controls passed, ACH file submitted to Fed.
+        - `settled` — Funds have settled at the Fed.
+        - `returned` — Settled transfer was returned by receiving bank.
+        - `rejected` — Control engine rejected the transfer (never submitted).
+        - `canceled` — Canceled after submission but before settlement.
+        Transitions: PENDING_APPROVAL to SUBMITTED or REJECTED, SUBMITTED to SETTLED or CANCELED, SETTLED to RETURNED.
+
+    AchDirection:
+      type: string
+      enum: [credit, debit]
+      description: |
+        Direction of the ACH transfer from the perspective of this account.
+        - `credit` — Push money out (originate a payment to an external party).
+        - `debit` — Pull money in (originate a collection from an external party).
+
+    AchWindow:
+      type: string
+      enum: [standard, same_day]
+      description: |
+        ACH processing window.
+        - `standard` — Next-day settlement (standard ACH).
+        - `same_day` — Same-day ACH (additional fee may apply, cutoff times enforced).
+
+    # --- ACH Counterparty ---
+    AchCounterparty:
+      type: object
+      required:
+        - routing_number
+        - account_number
+        - account_type
+        - name
+      properties:
+        routing_number:
+          type: string
+          pattern: '^\d{9}$'
+          description: ABA routing number of the receiving institution.
+        account_number:
+          type: string
+          maxLength: 17
+          description: Account number at the receiving institution.
+        account_type:
+          type: string
+          enum: [checking, savings]
+          description: Account type at the receiving institution.
+        name:
+          type: string
+          maxLength: 22
+          description: |
+            Receiver name as it will appear in the ACH file.
+            Max 22 characters per NACHA format.
+
+    # --- Control Result (returned on gated operations) ---
+    ControlResult:
+      type: object
+      description: |
+        Result of a control engine evaluation on this operation. Included in
+        responses for all gated endpoints so the partner can see which controls
+        ran and their outcomes.
+      properties:
+        control_id:
+          type: string
+          description: Control identifier (e.g., BA-05, BA-07, VL-01).
+        control_name:
+          type: string
+          description: Human-readable control name.
+        verdict:
+          type: string
+          enum: [pass, fail, flag, not_applicable]
+          description: |
+            - `pass` — Control conditions satisfied.
+            - `fail` — Control blocked the operation.
+            - `flag` — Control raised an alert but did not block (e.g., suspicious but below threshold).
+            - `not_applicable` — Control was not relevant to this operation.
+        detail:
+          type: string
+          description: Human-readable explanation of the verdict.
+
+    # --- ACH Transfer (full response) ---
+    AchTransfer:
+      type: object
+      required:
+        - id
+        - account_id
+        - account_number_id
+        - direction
+        - amount
+        - currency
+        - status
+        - window
+        - counterparty
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          readOnly: true
+          pattern: '^ach_[a-zA-Z0-9]{20}$'
+          description: Unique ACH transfer identifier.
+          examples:
+            - ach_5kRb3mNqWsT8xLpJ2vYz
+        account_id:
+          type: string
+          description: The ledger account being debited or credited.
+        account_number_id:
+          type: string
+          description: |
+            The specific account number used for this transfer. Determines the
+            routing/account number pair that appears in the ACH file.
+        direction:
+          $ref: "#/components/schemas/AchDirection"
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Transfer amount in cents. Must be positive.
+        currency:
+          type: string
+          const: USD
+        status:
+          $ref: "#/components/schemas/AchTransferStatus"
+        window:
+          $ref: "#/components/schemas/AchWindow"
+        counterparty:
+          $ref: "#/components/schemas/AchCounterparty"
+        description:
+          type: string
+          maxLength: 10
+          description: |
+            Company entry description in the ACH batch header.
+            Max 10 characters per NACHA format (e.g., "PAYROLL", "PAYMENT").
+        company_name:
+          type: string
+          maxLength: 16
+          description: |
+            Originator company name in the ACH batch header.
+            Max 16 characters per NACHA format. Defaults to partner's registered name.
+        effective_date:
+          type: string
+          format: date
+          readOnly: true
+          description: |
+            The date the transfer will settle at the Fed. Set by the system based
+            on the processing window and submission time. For same-day ACH, this is
+            today (if before cutoff) or next business day.
+        expected_settlement:
+          type: string
+          format: date-time
+          readOnly: true
+          description: |
+            Estimated settlement timestamp. More precise than effective_date —
+            accounts for Fed processing windows, weekends, and holidays.
+        settled_at:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Actual settlement timestamp. Populated when status becomes `settled`.
+        returned_at:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Timestamp of the return. Populated when status becomes `returned`.
+        return_code:
+          type: string
+          readOnly: true
+          description: |
+            NACHA return reason code (e.g., R01 Insufficient Funds, R02 Account Closed,
+            R03 No Account, R04 Invalid Account Number). Only present when status is `returned`.
+          examples:
+            - "R01"
+            - "R02"
+            - "R03"
+        return_reason:
+          type: string
+          readOnly: true
+          description: Human-readable return reason. Only present when status is `returned`.
+        rejection_reason:
+          type: string
+          readOnly: true
+          description: |
+            Explanation of why the control engine rejected this transfer.
+            Only present when status is `rejected`.
+        control_results:
+          type: array
+          readOnly: true
+          items:
+            $ref: "#/components/schemas/ControlResult"
+          description: |
+            Results of all control engine evaluations for this transfer.
+            Populated at creation time (when the control engine gates the transfer).
+        blnk_transaction_id:
+          type: string
+          readOnly: true
+          description: Corresponding transaction ID in Blnk Deploy.
+          x-source: blnk
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    # --- Create ACH Transfer ---
+    CreateAchTransfer:
+      type: object
+      required:
+        - account_id
+        - direction
+        - amount
+        - counterparty
+      properties:
+        account_id:
+          type: string
+          description: |
+            The ledger account to debit (for credits) or credit (for debits).
+            Must be in `open` status with no blocking lock.
+        account_number_id:
+          type: string
+          description: |
+            Specific account number to use. If omitted, the account's primary
+            (first created) account number is used.
+        direction:
+          $ref: "#/components/schemas/AchDirection"
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Transfer amount in cents.
+        counterparty:
+          $ref: "#/components/schemas/AchCounterparty"
+        window:
+          $ref: "#/components/schemas/AchWindow"
+        description:
+          type: string
+          maxLength: 10
+          description: Company entry description for the ACH batch header.
+        company_name:
+          type: string
+          maxLength: 16
+          description: Originator company name for the ACH batch header.
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+
+    # --- ACH Transfer List ---
+    AchTransferList:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/AchTransfer"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    # --- ACH Batch Item ---
+    AchBatchItem:
+      type: object
+      required:
+        - account_id
+        - direction
+        - amount
+        - counterparty
+      description: |
+        A single transfer within a batch ACH submission. Same fields as
+        CreateAchTransfer plus a partner-provided `reference` for correlation.
+      properties:
+        reference:
+          type: string
+          maxLength: 100
+          description: |
+            Partner-provided reference for correlating batch results to input items.
+            Returned in the batch response and in webhook events.
+        account_id:
+          type: string
+        account_number_id:
+          type: string
+        direction:
+          $ref: "#/components/schemas/AchDirection"
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+        counterparty:
+          $ref: "#/components/schemas/AchCounterparty"
+        description:
+          type: string
+          maxLength: 10
+        company_name:
+          type: string
+          maxLength: 16
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+
+    # --- Create ACH Batch ---
+    CreateAchBatch:
+      type: object
+      required:
+        - transfers
+      properties:
+        window:
+          $ref: "#/components/schemas/AchWindow"
+        transfers:
+          type: array
+          items:
+            $ref: "#/components/schemas/AchBatchItem"
+          minItems: 1
+          maxItems: 5000
+          description: |
+            Array of individual ACH transfers to submit as a single NACHA batch.
+            Each transfer is evaluated independently by the control engine.
+            Individual items may be rejected while others succeed.
+
+    # --- ACH Batch Result Item ---
+    AchBatchResultItem:
+      type: object
+      properties:
+        reference:
+          type: string
+          description: The partner-provided reference from the input item.
+        transfer:
+          $ref: "#/components/schemas/AchTransfer"
+        error:
+          $ref: "#/components/schemas/Error"
+        succeeded:
+          type: boolean
+          description: Whether this individual transfer was accepted.
+
+    # --- ACH Batch Response ---
+    AchBatchResponse:
+      type: object
+      required:
+        - batch_id
+        - total_count
+        - accepted_count
+        - rejected_count
+        - results
+      properties:
+        batch_id:
+          type: string
+          readOnly: true
+          pattern: '^achbatch_[a-zA-Z0-9]{20}$'
+          description: Unique batch identifier.
+        total_count:
+          type: integer
+          description: Total number of transfers in the batch.
+        accepted_count:
+          type: integer
+          description: Number of transfers accepted (created in pending_approval or submitted).
+        rejected_count:
+          type: integer
+          description: Number of transfers rejected by validation or control engine.
+        total_amount:
+          type: integer
+          format: int64
+          description: Sum of all accepted transfer amounts in cents.
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/AchBatchResultItem"
+
+    # ========================================================================
+    # Book Transfer (Decision 8 — on-us instant transfers)
+    # ========================================================================
+
+    BookTransferStatus:
+      type: string
+      enum: [pending, completed, rejected]
+      description: |
+        Book transfer lifecycle state.
+        - `pending` — Created, control engine evaluating.
+        - `completed` — Funds moved instantly (both sides settled).
+        - `rejected` — Control engine rejected the transfer.
+        Book transfers are instant and on-us, so there is no submitted/returned flow.
+
+    # --- Book Transfer (full response) ---
+    BookTransfer:
+      type: object
+      required:
+        - id
+        - source_account_id
+        - destination_account_id
+        - amount
+        - currency
+        - status
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          readOnly: true
+          pattern: '^book_[a-zA-Z0-9]{20}$'
+          description: Unique book transfer identifier.
+          examples:
+            - book_7kFb2mNqRsT9xLpW4vYz
+        source_account_id:
+          type: string
+          description: The account being debited.
+        destination_account_id:
+          type: string
+          description: The account being credited.
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Transfer amount in cents.
+        currency:
+          type: string
+          const: USD
+        status:
+          $ref: "#/components/schemas/BookTransferStatus"
+        description:
+          type: string
+          maxLength: 140
+          description: Free-text description of the transfer purpose.
+        rejection_reason:
+          type: string
+          readOnly: true
+          description: |
+            Explanation of why the control engine rejected this transfer.
+            Only present when status is `rejected`.
+        control_results:
+          type: array
+          readOnly: true
+          items:
+            $ref: "#/components/schemas/ControlResult"
+          description: Results of control engine evaluations.
+        blnk_transaction_id:
+          type: string
+          readOnly: true
+          description: Corresponding transaction ID in Blnk Deploy.
+          x-source: blnk
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    # --- Create Book Transfer ---
+    CreateBookTransfer:
+      type: object
+      required:
+        - source_account_id
+        - destination_account_id
+        - amount
+      properties:
+        source_account_id:
+          type: string
+          description: |
+            Account to debit. Must be `open`, no blocking lock, and sufficient
+            available balance (balance minus locked_amount minus inflight_debit_balance).
+        destination_account_id:
+          type: string
+          description: |
+            Account to credit. Must be `open` or `frozen` (frozen accounts accept
+            credits). Must be in the same fintech instance as the source.
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Transfer amount in cents.
+        description:
+          type: string
+          maxLength: 140
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+
+    # --- Book Transfer List ---
+    BookTransferList:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/BookTransfer"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
 # ============================================================================
 # Paths — Entity
 # ============================================================================
@@ -2581,3 +3100,445 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+
+  # ==========================================================================
+  # Paths — ACH Transfer
+  # ==========================================================================
+
+  /transfers/ach:
+    get:
+      operationId: listAchTransfers
+      summary: List ACH transfers
+      description: |
+        Returns a paginated list of ACH transfers. Supports filtering by account,
+        status, direction, and date range. Results ordered by `created_at` descending.
+      tags: [ACH Transfers]
+      parameters:
+        - $ref: "#/components/parameters/PaginationLimit"
+        - $ref: "#/components/parameters/PaginationAfter"
+        - name: account_id
+          in: query
+          schema:
+            type: string
+          description: Filter by ledger account.
+        - name: account_number_id
+          in: query
+          schema:
+            type: string
+          description: Filter by specific account number.
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/AchTransferStatus"
+          description: Filter by transfer status.
+        - name: direction
+          in: query
+          schema:
+            $ref: "#/components/schemas/AchDirection"
+          description: Filter by direction (credit or debit).
+        - name: window
+          in: query
+          schema:
+            $ref: "#/components/schemas/AchWindow"
+          description: Filter by processing window.
+        - name: created_after
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Only return transfers created after this timestamp.
+        - name: created_before
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Only return transfers created before this timestamp.
+      responses:
+        "200":
+          description: Paginated list of ACH transfers.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-API-Version:
+              $ref: "#/components/headers/X-API-Version"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+            X-RateLimit-Tier:
+              $ref: "#/components/headers/X-RateLimit-Tier"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AchTransferList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+    post:
+      operationId: createAchTransfer
+      summary: Create an ACH transfer
+      description: |
+        Originates a single ACH transfer. The transfer enters `pending_approval`
+        status while the control engine evaluates it. If all controls pass, it
+        advances to `submitted` and an ACH file is queued for the next Fed window.
+        If any control fails, the transfer is `rejected` immediately.
+
+        The response includes `control_results` showing which controls ran and
+        their verdicts, `effective_date`, and `expected_settlement`.
+
+        For on-us transfers (both accounts within this instance), use
+        `POST /transfers/book` instead — it settles instantly without going
+        through the ACH network.
+
+        **Control gates:** BA-05 (OFAC on counterparty name), BA-07 (CTR threshold),
+        BA-08 (structuring detection), VL-01 (daily ACH velocity).
+
+        **Events emitted:** `ach_transfer.created`, then `ach_transfer.submitted`
+        or `ach_transfer.rejected` based on control engine verdict.
+      tags: [ACH Transfers]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAchTransfer"
+      responses:
+        "201":
+          description: |
+            ACH transfer created. Status will be `pending_approval` (controls still
+            evaluating), `submitted` (controls passed), or `rejected` (controls failed).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            Idempotent-Replayed:
+              $ref: "#/components/headers/Idempotent-Replayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AchTransfer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: |
+            Unprocessable — the account is frozen, locked, closed, or has
+            insufficient available balance (for credit direction).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                status: 422
+                type: insufficient_funds
+                title: Insufficient Funds
+                detail: "Account acct_3rTv8m has available balance of $50.00; transfer requires $100.00."
+                doc_url: "https://api.cassandra.bank/docs/errors/insufficient-funds"
+                request_id: req_xyz789
+                resource_id: acct_3rTv8mKqWsN5xLpJ7bYz
+                resource_type: account
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /transfers/ach/{ach_transfer_id}:
+    get:
+      operationId: getAchTransfer
+      summary: Retrieve an ACH transfer
+      description: |
+        Returns a single ACH transfer by ID, including current status, settlement
+        timing, control results, and return information (if applicable).
+      tags: [ACH Transfers]
+      parameters:
+        - name: ach_transfer_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The ACH transfer.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AchTransfer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /transfers/ach/{ach_transfer_id}/cancel:
+    post:
+      operationId: cancelAchTransfer
+      summary: Cancel an ACH transfer
+      description: |
+        Cancels a submitted ACH transfer before it settles. Only transfers in
+        `submitted` status can be canceled — once a transfer has settled, you
+        must initiate a return through the receiving bank.
+
+        Cancellation is best-effort: if the ACH file has already been transmitted
+        to the Fed, cancellation may fail. In that case, the transfer remains
+        `submitted` and settles normally.
+
+        **Events emitted:** `ach_transfer.canceled` (if successful).
+      tags: [ACH Transfers]
+      parameters:
+        - name: ach_transfer_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  maxLength: 500
+                  description: Reason for cancellation. Recorded in audit log.
+      responses:
+        "200":
+          description: Transfer canceled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AchTransfer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            Transfer cannot be canceled — either it is not in `submitted` status,
+            or the ACH file has already been transmitted to the Fed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                status: 409
+                type: transfer_not_cancelable
+                title: Transfer Not Cancelable
+                detail: "ACH transfer ach_5kRb3m is in status 'settled' and cannot be canceled."
+                doc_url: "https://api.cassandra.bank/docs/errors/transfer-not-cancelable"
+                request_id: req_xyz789
+                resource_id: ach_5kRb3mNqWsT8xLpJ2vYz
+                resource_type: ach_transfer
+
+  /transfers/ach/batch:
+    post:
+      operationId: createAchBatch
+      summary: Create a batch of ACH transfers
+      description: |
+        Submits up to 5,000 ACH transfers in a single request. Each transfer is
+        validated and evaluated by the control engine independently — individual
+        items may be rejected while others succeed.
+
+        All transfers in the batch share the same processing window. If `window`
+        is specified at the batch level, it applies to all items (items cannot
+        override it individually).
+
+        The response returns per-item results with the partner-provided `reference`
+        for correlation.
+
+        **Rate limit tier:** Bulk (10/min).
+
+        **Control gates:** Same as individual ACH creation — each item is evaluated independently.
+
+        **Events emitted:** One `ach_transfer.created` per accepted item, followed by
+        `ach_transfer.submitted` or `ach_transfer.rejected` per item.
+      tags: [ACH Transfers]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAchBatch"
+      responses:
+        "200":
+          description: |
+            Batch processed. Check individual `results[].succeeded` to determine
+            which transfers were accepted. HTTP 200 even if some items failed —
+            the batch itself was processed successfully.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            Idempotent-Replayed:
+              $ref: "#/components/headers/Idempotent-Replayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AchBatchResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  # ==========================================================================
+  # Paths — Book Transfer
+  # ==========================================================================
+
+  /transfers/book:
+    get:
+      operationId: listBookTransfers
+      summary: List book transfers
+      description: |
+        Returns a paginated list of book transfers. Supports filtering by account
+        (source or destination), status, and date range.
+      tags: [Book Transfers]
+      parameters:
+        - $ref: "#/components/parameters/PaginationLimit"
+        - $ref: "#/components/parameters/PaginationAfter"
+        - name: account_id
+          in: query
+          schema:
+            type: string
+          description: Filter by account (matches either source or destination).
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/BookTransferStatus"
+          description: Filter by transfer status.
+        - name: created_after
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: created_before
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Paginated list of book transfers.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-API-Version:
+              $ref: "#/components/headers/X-API-Version"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+            X-RateLimit-Tier:
+              $ref: "#/components/headers/X-RateLimit-Tier"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BookTransferList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+    post:
+      operationId: createBookTransfer
+      summary: Create a book transfer
+      description: |
+        Creates an instant on-us transfer between two accounts in the same fintech
+        instance. Both sides settle immediately via Blnk's double-entry ledger —
+        no ACH network or Fed involvement.
+
+        The transfer enters `pending` status momentarily while the control engine
+        evaluates it, then resolves to `completed` or `rejected` synchronously in
+        the same request. The response always reflects the final state.
+
+        Both accounts must be in the same fintech instance. For transfers to
+        accounts in other instances or external banks, use
+        `POST /transfers/ach` or `POST /transfers/wire`.
+
+        **Control gates:** BA-05 (OFAC), BA-07 (CTR threshold), BA-08 (structuring),
+        VL-01 (daily velocity). Same controls as ACH — book transfers are not a
+        compliance bypass. The same event model is used for BSA monitoring.
+
+        **Events emitted:** `book_transfer.completed` or `book_transfer.rejected`.
+      tags: [Book Transfers]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateBookTransfer"
+      responses:
+        "201":
+          description: |
+            Book transfer created. Status will be `completed` (controls passed,
+            funds moved) or `rejected` (controls failed, no funds moved).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            Idempotent-Replayed:
+              $ref: "#/components/headers/Idempotent-Replayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BookTransfer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: |
+            Unprocessable — source account is frozen/locked/closed, destination
+            account is closed, insufficient available balance, or accounts are
+            not in the same instance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /transfers/book/{book_transfer_id}:
+    get:
+      operationId: getBookTransfer
+      summary: Retrieve a book transfer
+      description: Returns a single book transfer by ID.
+      tags: [Book Transfers]
+      parameters:
+        - name: book_transfer_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The book transfer.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BookTransfer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
