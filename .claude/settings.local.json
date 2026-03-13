@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx jest:*)",
+      "Bash(npx ts-node -e \":*)",
+      "Bash(npx ts-node --compiler-options '{\"\"strict\"\":false}' -e \":*)",
+      "Bash(npx ts-node --compiler-options '{\"\"strict\"\":false}' -e \"var yaml = require\\(''js-yaml''\\); var fs = require\\(''fs''\\); var parser = require\\(''./src/parser''\\); var doc = yaml.load\\(fs.readFileSync\\(''cassandra-openapi.yaml'', ''utf-8''\\)\\); var result = parser.parseSpec\\(doc\\); var v = result.vocabulary; var domainEvts = v.events.filter\\(function\\(e\\) { return e.trigger_type !== ''audit'' && e.trigger_type !== ''state_transition''; }\\); domainEvts.slice\\(0,40\\).forEach\\(function\\(e\\) { console.log\\(e.name + ''|'' + e.trigger_type + ''|'' + e.source_entity\\); }\\); console.log\\(''Total domain:'', domainEvts.length\\);\")",
+      "Bash(npx ts-node --compiler-options '{\"\"strict\"\":false}' _inspect.js)",
+      "Bash(npm test)",
+      "Bash(npx ts-node --compiler-options '{\"\"strict\"\":false}' _inspect2.js)",
+      "Bash(node _inspect2.js)"
+    ]
+  }
+}

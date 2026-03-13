@@ -1,0 +1,186 @@
+Vocabulary Parser Report
+========================
+Spec: Cassandra Banking Core & Compliance Platform v1.0.0
+Parsed at: 2026-03-06T15:02:32.717Z
+
+Entities:        153
+Fields:          1105
+Computed fields: 22
+Events:          791
+Endpoints:       587
+State machines:  15
+Plugins:         0
+
+Entities:
+  314a (314a) — 5 fields, 1 events, retention: 5y
+  314b (314b) — 3 fields, 1 events, retention: 5y
+  aa (Aa) — 6 fields, 0 events, retention: 25mo
+  account (Account) — 4 fields, 4 events, retention: 7y
+  ach_transfer (AchTransfer) — 14 fields, 3 events, retention: 5y
+  ai_governance (AiGovernance) — 7 fields, 2 events, retention: 7y
+  application (Application) — 8 fields, 4 events, retention: 25mo
+  appraisal (Appraisal) — 6 fields, 2 events, retention: 25mo
+  asset (Asset) — 9 fields, 2 events, retention: 7y
+  atr (Atr) — 8 fields, 1 events, retention: 25mo
+  audit (Audit) — 7 fields, 4 events, retention: 7y
+  backup (Backup) — 3 fields, 2 events, retention: 7y
+  badge (Badge) — 3 fields, 1 events, retention: 7y
+  bal (Bal) — 5 fields, 0 events, retention: 7y
+  bcdr (Bcdr) — 5 fields, 0 events, retention: 7y
+  bcm (Bcm) — 6 fields, 5 events, retention: 7y
+  bo (Bo) — 4 fields, 3 events, retention: permanent
+  campaign (Campaign) — 3 fields, 2 events, retention: 25mo
+  cash (Cash) — 8 fields, 2 events, retention: 7y
+  cda (Cda) — 38 fields, 26 events, retention: 7y
+  cdd (Cdd) — 7 fields, 1 events, retention: 5y
+  cfg (Cfg) — 11 fields, 0 events, retention: 7y
+  cfp (Cfp) — 7 fields, 1 events, retention: 7y
+  cfp_escalation (CfpEscalationRoster) — 5 fields, 1 events, retention: 7y
+  change (Change) — 6 fields, 2 events, retention: 7y
+  cmir (Cmir) — 6 fields, 1 events, retention: 5y
+  collateral (Collateral) — 15 fields, 2 events, retention: 25mo
+  collections (Collections) — 10 fields, 2 events, retention: 7y
+  comm (Comm) — 4 fields, 0 events, retention: 7y
+  complaint (Complaint) — 14 fields, 4 events, retention: 7y
+  connection (Connection) — 5 fields, 0 events, retention: 7y
+  contract (Contract) — 9 fields, 4 events, retention: 7y
+  cookie (Cookie) — 3 fields, 2 events, retention: 7y
+  counterparty (Counterparty) — 6 fields, 1 events, retention: 7y
+  courier (Courier) — 4 fields, 0 events, retention: 7y
+  coverage (Coverage) — 3 fields, 1 events, retention: 7y
+  credit (Credit) — 9 fields, 6 events, retention: 25mo
+  credit_package (CreditPackage) — 4 fields, 2 events, retention: 25mo
+  ctr (Ctr) — 4 fields, 1 events, retention: 5y
+  cust (Cust) — 6 fields, 5 events, retention: 7y
+  customer (Customer) — 5 fields, 1 events, retention: permanent
+  data (Data) — 13 fields, 3 events, retention: 7y
+  decision (Decision) — 6 fields, 10 events, retention: 25mo
+  device (Device) — 6 fields, 3 events, retention: 7y
+  dispute (Dispute) — 7 fields, 2 events, retention: 7y
+  dr (Dr) — 4 fields, 1 events, retention: 7y
+  drill (Drill) — 5 fields, 1 events, retention: 7y
+  ecdd (Ecdd) — 6 fields, 0 events, retention: 5y
+  econsent (Econsent) — 4 fields, 1 events, retention: 7y
+  edd (Edd) — 3 fields, 1 events, retention: 7y
+  entity (Entity) — 7 fields, 0 events, retention: permanent
+  ewi (Ewi) — 5 fields, 0 events, retention: 7y
+  exception (Exception) — 7 fields, 3 events, retention: 25mo
+  exp (Exp) — 4 fields, 0 events, retention: 7y
+  facility (Facility) — 6 fields, 1 events, retention: 7y
+  fbar (Fbar) — 5 fields, 1 events, retention: 5y
+  fl_monitoring (FlMonitoringReview) — 6 fields, 2 events, retention: 7y
+  flow (Flow) — 4 fields, 0 events, retention: 7y
+  flra (Flra) — 5 fields, 2 events, retention: 7y
+  foreclosure (Foreclosure) — 4 fields, 0 events, retention: 7y
+  freeze (Freeze) — 6 fields, 0 events, retention: 7y
+  funding (Funding) — 4 fields, 1 events, retention: 7y
+  furnisher (Furnisher) — 4 fields, 2 events, retention: 7y
+  gap (Gap) — 4 fields, 0 events, retention: 7y
+  gov (Gov) — 8 fields, 4 events, retention: 7y
+  governance (Governance) — 12 fields, 12 events, retention: 7y
+  hmda_record (HmdaRecord) — 6 fields, 2 events, retention: 7y
+  hr (Hr) — 7 fields, 11 events, retention: 7y
+  iam (Iam) — 7 fields, 0 events, retention: 7y
+  imt (Imt) — 4 fields, 0 events, retention: 7y
+  incident (Incident) — 23 fields, 13 events, retention: 7y
+  instrument (Instrument) — 6 fields, 0 events, retention: 7y
+  insurance (Insurance) — 5 fields, 0 events, retention: 7y
+  investment (Investment) — 6 fields, 4 events, retention: 7y
+  ir (Ir) — 10 fields, 0 events, retention: 7y
+  kms (Kms) — 4 fields, 0 events, retention: 7y
+  kri (Kri) — 12 fields, 3 events, retention: 7y
+  kyc (Kyc) — 4 fields, 6 events, retention: 5y
+  ladder (Ladder) — 4 fields, 0 events, retention: 7y
+  limit (Limit) — 7 fields, 0 events, retention: 7y
+  liquidity (Liquidity) — 8 fields, 5 events, retention: 7y
+  lms (Lms) — 6 fields, 1 events, retention: 7y
+  loan (Loan) — 22 fields, 19 events, retention: 7y
+  logging (Logging) — 5 fields, 1 events, retention: 7y
+  mdm (Mdm) — 4 fields, 0 events, retention: 7y
+  member (Member) — 23 fields, 3 events, retention: permanent
+  metric (Metric) — 10 fields, 0 events, retention: 7y
+  mi (Mi) — 7 fields, 2 events, retention: 7y
+  model (Model) — 4 fields, 0 events, retention: 7y
+  msb (Msb) — 6 fields, 0 events, retention: 7y
+  nightdrop (Nightdrop) — 3 fields, 1 events, retention: 7y
+  notice (Notice) — 4 fields, 2 events, retention: 7y
+  ofac (Ofac) — 4 fields, 1 events, retention: 10y
+  ops (Ops) — 3 fields, 3 events, retention: 7y
+  overdraft (Overdraft) — 8 fields, 4 events, retention: 7y
+  party (Party) — 6 fields, 0 events, retention: permanent
+  payment (Payment) — 4 fields, 1 events, retention: 5y
+  pep (Pep) — 8 fields, 2 events, retention: 5y
+  performance (Performance) — 5 fields, 1 events, retention: 7y
+  phys (Phys) — 4 fields, 0 events, retention: 7y
+  playbook (Playbook) — 5 fields, 0 events, retention: 7y
+  policy (Policy) — 12 fields, 8 events, retention: 7y
+  prequal (Prequal) — 4 fields, 2 events, retention: 25mo
+  pricing (Pricing) — 5 fields, 5 events, retention: 25mo
+  privacy (Privacy) — 9 fields, 6 events, retention: 7y
+  product (Product) — 8 fields, 4 events, retention: 7y
+  record (Record) — 7 fields, 3 events, retention: 7y
+  records (Records) — 16 fields, 6 events, retention: 7y
+  redflag (Redflag) — 5 fields, 1 events, retention: 7y
+  reg (Reg) — 3 fields, 5 events, retention: 7y
+  regulator_notification (RegulatorNotification) — 8 fields, 1 events, retention: 7y
+  repo (Repo) — 7 fields, 2 events, retention: 7y
+  report (Report) — 4 fields, 1 events, retention: 7y
+  reporting (Reporting) — 4 fields, 3 events, retention: 7y
+  risk (Risk) — 22 fields, 16 events, retention: 7y
+  risk_acceptance (RiskAcceptance) — 12 fields, 3 events, retention: 7y
+  risk_appetite (RiskAppetite) — 12 fields, 4 events, retention: 7y
+  risk_assessment (RiskAssessment) — 3 fields, 2 events, retention: 7y
+  risk_breach (RiskBreach) — 12 fields, 4 events, retention: 7y
+  risk_record (RiskRecord) — 14 fields, 2 events, retention: 7y
+  risk_report (RiskReport) — 8 fields, 2 events, retention: 7y
+  risk_scale (RiskScale) — 3 fields, 1 events, retention: 7y
+  risk_score (RiskScore) — 12 fields, 0 events, retention: 7y
+  risk_taxonomy (RiskTaxonomy) — 8 fields, 2 events, retention: 7y
+  role (Role) — 8 fields, 1 events, retention: 7y
+  safety (Safety) — 4 fields, 0 events, retention: 7y
+  sar (Sar) — 6 fields, 2 events, retention: 5y
+  scope (Scope) — 4 fields, 1 events, retention: 7y
+  screen (Screen) — 4 fields, 2 events, retention: 7y
+  shipment (Shipment) — 4 fields, 2 events, retention: 7y
+  siem (Siem) — 3 fields, 1 events, retention: 7y
+  site (Site) — 4 fields, 0 events, retention: 7y
+  social_media (SocialMediaPost) — 6 fields, 2 events, retention: 7y
+  stake (Stake) — 5 fields, 0 events, retention: 7y
+  stress (Stress) — 8 fields, 0 events, retention: 7y
+  svc (Svc) — 8 fields, 0 events, retention: 7y
+  tele (Tele) — 4 fields, 0 events, retention: 7y
+  teller (Teller) — 3 fields, 1 events, retention: 7y
+  template (Template) — 5 fields, 0 events, retention: 7y
+  test (Test) — 11 fields, 3 events, retention: 7y
+  tms (Tms) — 3 fields, 2 events, retention: 5y
+  tp (Tp) — 6 fields, 2 events, retention: 7y
+  trade (Trade) — 6 fields, 3 events, retention: 7y
+  training (Training) — 7 fields, 5 events, retention: 7y
+  trustee (Trustee) — 4 fields, 2 events, retention: 7y
+  txn (Txn) — 4 fields, 1 events, retention: 5y
+  underwriting (Underwriting) — 3 fields, 2 events, retention: 25mo
+  valuation (Valuation) — 6 fields, 5 events, retention: 7y
+  vendor (Vendor) — 47 fields, 31 events, retention: 7y
+  visitor (Visitor) — 4 fields, 1 events, retention: 7y
+  vuln (Vuln) — 5 fields, 1 events, retention: 7y
+  wire (Wire) — 7 fields, 2 events, retention: 5y
+  wire_transfer (WireTransfer) — 13 fields, 3 events, retention: 5y
+
+State Machines:
+  Account.status — 3 states, 4 transitions
+  AchTransfer.status — 6 states, 5 transitions
+  Application.status — 6 states, 6 transitions
+  Bcm.status — 6 states, 6 transitions
+  Cda.status — 6 states, 6 transitions
+  Cfp.status — 6 states, 6 transitions
+  Collections.status — 6 states, 6 transitions
+  Decision.status — 5 states, 6 transitions
+  Entity.status — 4 states, 4 transitions
+  Incident.status — 6 states, 5 transitions
+  Loan.status — 8 states, 9 transitions
+  Privacy.consent_status — 4 states, 4 transitions
+  RiskRecord.status — 5 states, 4 transitions
+  Vendor.status — 8 states, 9 transitions
+  WireTransfer.status — 7 states, 7 transitions
+
+Plugins:

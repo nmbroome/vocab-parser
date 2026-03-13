@@ -1,0 +1,38 @@
+{
+  "name": "@cassandra/vocabulary-parser",
+  "version": "0.1.0",
+  "description": "Extracts compliance vocabulary from OpenAPI specs with x- extensions for the Cassandra Control Engine",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "parse": "ts-node src/cli.ts",
+    "validate": "ts-node src/cli.ts --validate-only",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "test:verbose": "jest --verbose",
+    "clean": "rm -rf dist output"
+  },
+  "keywords": [
+    "openapi",
+    "compliance",
+    "vocabulary",
+    "parser",
+    "cassandra"
+  ],
+  "license": "UNLICENSED",
+  "dependencies": {
+    "js-yaml": "^4.1.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.13.4",
+    "jest": "^30.2.0",
+    "ts-jest": "^29.4.6",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.3"
+  }
+}
