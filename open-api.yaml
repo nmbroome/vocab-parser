@@ -2052,6 +2052,307 @@ components:
         pagination:
           $ref: "#/components/schemas/Pagination"
 
+    # ========================================================================
+    # Wire Transfer (Decision 9)
+    # ========================================================================
+
+    # --- Enums ---
+    WireTransferStatus:
+      type: string
+      enum:
+        - pending_approval
+        - submitted
+        - completed
+        - return_requested
+        - returned
+        - rejected
+        - canceled
+      description: |
+        Wire transfer lifecycle state.
+        - `pending_approval` — Created, awaiting control engine evaluation.
+        - `submitted` — Controls passed, Fedwire message submitted.
+        - `completed` — Wire completed (funds irrevocably transferred).
+        - `return_requested` — A return has been requested after completion.
+        - `returned` — Return request honored by receiving bank; funds returned.
+        - `rejected` — Control engine rejected the transfer (never submitted).
+        - `canceled` — Canceled after submission but before completion.
+        Transitions: PENDING_APPROVAL to SUBMITTED or REJECTED,
+        SUBMITTED to COMPLETED or CANCELED,
+        COMPLETED to RETURN_REQUESTED,
+        RETURN_REQUESTED to RETURNED or COMPLETED (request denied).
+
+    WireDirection:
+      type: string
+      enum: [outbound, inbound]
+      description: |
+        Direction of the wire transfer.
+        - `outbound` — Originated by this instance, sending funds via Fedwire.
+        - `inbound` — Received from an external bank via Fedwire, routed by the
+          aggregator to this instance based on account number prefix.
+
+    WireReturnRequestReason:
+      type: string
+      enum: [fraud, duplicate, incorrect_amount, incorrect_beneficiary]
+      description: |
+        Reason for requesting a wire return. Per Decision 9, only these four
+        reasons are supported. Wire returns are requests, not guarantees —
+        the receiving bank may deny the return.
+
+    # --- Wire Beneficiary ---
+    WireBeneficiary:
+      type: object
+      required:
+        - name
+        - routing_number
+        - account_number
+      description: The receiving party and their bank details for an outbound wire.
+      properties:
+        name:
+          type: string
+          maxLength: 35
+          description: Beneficiary name as it will appear on the Fedwire message.
+        routing_number:
+          type: string
+          pattern: '^\d{9}$'
+          description: ABA routing number of the beneficiary's bank.
+        account_number:
+          type: string
+          maxLength: 34
+          description: Account number at the beneficiary's bank.
+        bank_name:
+          type: string
+          maxLength: 35
+          description: |
+            Name of the beneficiary's bank. Optional — if omitted, resolved
+            automatically from the routing number via the Fed directory.
+        address:
+          $ref: "#/components/schemas/Address"
+
+    # --- Wire Originator Info (for inbound wires) ---
+    WireOriginator:
+      type: object
+      readOnly: true
+      description: |
+        Originator information from an inbound Fedwire message. Read-only —
+        populated by the aggregator when routing an inbound wire.
+      properties:
+        name:
+          type: string
+        routing_number:
+          type: string
+        account_number:
+          type: string
+        bank_name:
+          type: string
+        reference:
+          type: string
+          description: Originator-to-beneficiary information (OBI) from the Fedwire message.
+
+    # --- Wire Transfer (full response) ---
+    WireTransfer:
+      type: object
+      required:
+        - id
+        - account_id
+        - account_number_id
+        - direction
+        - amount
+        - currency
+        - status
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          readOnly: true
+          pattern: '^wire_[a-zA-Z0-9]{20}$'
+          description: Unique wire transfer identifier.
+          examples:
+            - wire_4nRb7mKqWsT3xLpJ9vYz
+        account_id:
+          type: string
+          description: The ledger account being debited (outbound) or credited (inbound).
+        account_number_id:
+          type: string
+          description: The account number used for this wire.
+        direction:
+          $ref: "#/components/schemas/WireDirection"
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Transfer amount in cents.
+        currency:
+          type: string
+          const: USD
+        status:
+          $ref: "#/components/schemas/WireTransferStatus"
+        beneficiary:
+          $ref: "#/components/schemas/WireBeneficiary"
+        originator:
+          $ref: "#/components/schemas/WireOriginator"
+        purpose:
+          type: string
+          maxLength: 140
+          description: |
+            Originator-to-beneficiary information (OBI). Free-text description
+            of the wire purpose, included in the Fedwire message.
+        imad:
+          type: string
+          readOnly: true
+          description: |
+            Input Message Accountability Data — the Fed's unique identifier for
+            this Fedwire message. Populated after submission. Used for tracing
+            and return requests.
+          examples:
+            - "20260313B1Q2R3S400000001"
+        omad:
+          type: string
+          readOnly: true
+          description: |
+            Output Message Accountability Data — assigned by the receiving Fed
+            bank. Populated after the wire is acknowledged.
+        submitted_at:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Timestamp when the Fedwire message was submitted.
+        completed_at:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Timestamp when the wire completed. Wires are typically same-day.
+        return_request:
+          readOnly: true
+          description: |
+            Details of the return request, if one has been filed.
+            Only present when status is `return_requested` or `returned`.
+          allOf:
+            - $ref: "#/components/schemas/WireReturnRequest"
+        rejection_reason:
+          type: string
+          readOnly: true
+          description: |
+            Explanation of why the control engine rejected this wire.
+            Only present when status is `rejected`.
+        control_results:
+          type: array
+          readOnly: true
+          items:
+            $ref: "#/components/schemas/ControlResult"
+          description: Results of control engine evaluations.
+        blnk_transaction_id:
+          type: string
+          readOnly: true
+          description: Corresponding transaction ID in Blnk Deploy.
+          x-source: blnk
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    # --- Create Wire Transfer ---
+    CreateWireTransfer:
+      type: object
+      required:
+        - account_id
+        - amount
+        - beneficiary
+      properties:
+        account_id:
+          type: string
+          description: |
+            The ledger account to debit. Must be in `open` status with no blocking
+            lock and sufficient available balance.
+        account_number_id:
+          type: string
+          description: |
+            Specific account number to use. If omitted, the account's primary
+            (first created) account number is used.
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Transfer amount in cents.
+        beneficiary:
+          $ref: "#/components/schemas/WireBeneficiary"
+        purpose:
+          type: string
+          maxLength: 140
+          description: Originator-to-beneficiary information included in the Fedwire message.
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+
+    # --- Wire Return Request ---
+    WireReturnRequest:
+      type: object
+      description: |
+        A request to return a completed wire. Wire returns are not guaranteed —
+        the receiving bank may deny the request. The return_request object tracks
+        the lifecycle of the request itself.
+      properties:
+        reason:
+          $ref: "#/components/schemas/WireReturnRequestReason"
+        detail:
+          type: string
+          maxLength: 500
+          description: Free-text explanation supporting the return request.
+        status:
+          type: string
+          enum: [pending, accepted, denied]
+          readOnly: true
+          description: |
+            Status of the return request.
+            - `pending` — Request submitted to receiving bank, awaiting response.
+            - `accepted` — Receiving bank honored the return; funds being returned.
+            - `denied` — Receiving bank denied the return request.
+        requested_at:
+          type: string
+          format: date-time
+          readOnly: true
+        resolved_at:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Timestamp when the return request was accepted or denied.
+
+    # --- Create Wire Return Request ---
+    CreateWireReturnRequest:
+      type: object
+      required:
+        - reason
+      properties:
+        reason:
+          $ref: "#/components/schemas/WireReturnRequestReason"
+        detail:
+          type: string
+          maxLength: 500
+          description: Supporting explanation for the return request.
+
+    # --- Wire Transfer List ---
+    WireTransferList:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/WireTransfer"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
 # ============================================================================
 # Paths — Entity
 # ============================================================================
@@ -3542,3 +3843,297 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  # ==========================================================================
+  # Paths — Wire Transfer
+  # ==========================================================================
+
+  /transfers/wire:
+    get:
+      operationId: listWireTransfers
+      summary: List wire transfers
+      description: |
+        Returns a paginated list of wire transfers. Supports filtering by account,
+        status, direction, and date range. Results ordered by `created_at` descending.
+      tags: [Wire Transfers]
+      parameters:
+        - $ref: "#/components/parameters/PaginationLimit"
+        - $ref: "#/components/parameters/PaginationAfter"
+        - name: account_id
+          in: query
+          schema:
+            type: string
+          description: Filter by ledger account.
+        - name: account_number_id
+          in: query
+          schema:
+            type: string
+          description: Filter by specific account number.
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/WireTransferStatus"
+          description: Filter by transfer status.
+        - name: direction
+          in: query
+          schema:
+            $ref: "#/components/schemas/WireDirection"
+          description: Filter by direction (outbound or inbound).
+        - name: created_after
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: created_before
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Paginated list of wire transfers.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-API-Version:
+              $ref: "#/components/headers/X-API-Version"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+            X-RateLimit-Tier:
+              $ref: "#/components/headers/X-RateLimit-Tier"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WireTransferList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+    post:
+      operationId: createWireTransfer
+      summary: Create a wire transfer
+      description: |
+        Originates a domestic Fedwire transfer. The transfer enters `pending_approval`
+        status while the control engine evaluates it. If all controls pass, it
+        advances to `submitted` and a Fedwire message is sent. If any control fails,
+        the transfer is `rejected` immediately.
+
+        Wires are domestic only (no SWIFT/international). For international
+        payments, partners must use their own correspondent banking relationships.
+
+        The response includes `control_results` and, once submitted, the `imad`
+        (Input Message Accountability Data) for Fed tracing.
+
+        **Control gates:** BA-05 (OFAC on beneficiary name and bank), BA-07 (CTR threshold),
+        BA-08 (structuring detection), VL-02 (wire velocity limits).
+
+        **Events emitted:** `wire_transfer.created`, then `wire_transfer.submitted`
+        or `wire_transfer.rejected`.
+      tags: [Wire Transfers]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWireTransfer"
+      responses:
+        "201":
+          description: |
+            Wire transfer created. Status will be `pending_approval`, `submitted`,
+            or `rejected` depending on control engine evaluation.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            Idempotent-Replayed:
+              $ref: "#/components/headers/Idempotent-Replayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WireTransfer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: |
+            Unprocessable — account is frozen, locked, closed, or has
+            insufficient available balance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /transfers/wire/{wire_transfer_id}:
+    get:
+      operationId: getWireTransfer
+      summary: Retrieve a wire transfer
+      description: |
+        Returns a single wire transfer by ID, including current status, IMAD/OMAD
+        (if submitted), control results, and return request details (if applicable).
+      tags: [Wire Transfers]
+      parameters:
+        - name: wire_transfer_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The wire transfer.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WireTransfer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /transfers/wire/{wire_transfer_id}/cancel:
+    post:
+      operationId: cancelWireTransfer
+      summary: Cancel a wire transfer
+      description: |
+        Cancels a submitted wire transfer before it completes. Only transfers in
+        `submitted` status can be canceled.
+
+        Wire cancellation is time-sensitive — Fedwire messages are processed in
+        near-real-time. If the message has already been acknowledged by the receiving
+        Fed bank, cancellation will fail and the wire will complete normally.
+
+        For completed wires, use the return request endpoint instead.
+
+        **Events emitted:** `wire_transfer.canceled` (if successful).
+      tags: [Wire Transfers]
+      parameters:
+        - name: wire_transfer_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  maxLength: 500
+                  description: Reason for cancellation. Recorded in audit log.
+      responses:
+        "200":
+          description: Wire transfer canceled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WireTransfer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            Wire cannot be canceled — either it is not in `submitted` status
+            or the Fedwire message has already been acknowledged.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                status: 409
+                type: transfer_not_cancelable
+                title: Transfer Not Cancelable
+                detail: "Wire transfer wire_4nRb7m is in status 'completed' and cannot be canceled. Use the return request endpoint instead."
+                doc_url: "https://api.cassandra.bank/docs/errors/transfer-not-cancelable"
+                request_id: req_xyz789
+                resource_id: wire_4nRb7mKqWsT3xLpJ9vYz
+                resource_type: wire_transfer
+
+  /transfers/wire/{wire_transfer_id}/return-request:
+    post:
+      operationId: createWireReturnRequest
+      summary: Request a wire return
+      description: |
+        Requests the return of a completed wire transfer. Only wires in `completed`
+        status can have a return requested.
+
+        **Wire returns are not guaranteed.** Unlike ACH returns (which are a right
+        within the return window), wire returns are requests to the receiving bank.
+        The receiving bank may deny the request, particularly if the beneficiary
+        has already withdrawn the funds.
+
+        Only four return reasons are supported per Decision 9:
+        - `fraud` — Suspected fraudulent wire.
+        - `duplicate` — Duplicate of a previous wire.
+        - `incorrect_amount` — Wrong amount was sent.
+        - `incorrect_beneficiary` — Wrong beneficiary received the funds.
+
+        The wire status transitions to `return_requested`. The return request has
+        its own lifecycle (pending, accepted, denied). If accepted, the wire moves
+        to `returned`. If denied, the wire reverts to `completed`.
+
+        **Events emitted:** `wire_transfer.return_requested`, then
+        `wire_transfer.returned` or `wire_transfer.return_denied`.
+      tags: [Wire Transfers]
+      parameters:
+        - name: wire_transfer_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWireReturnRequest"
+      responses:
+        "200":
+          description: |
+            Return request submitted. The wire status is now `return_requested`.
+            Monitor via webhooks or polling for the final outcome.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WireTransfer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            Wire is not in `completed` status, or a return request has already
+            been submitted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                status: 409
+                type: return_request_not_allowed
+                title: Return Request Not Allowed
+                detail: "Wire transfer wire_4nRb7m is in status 'submitted' and cannot have a return requested. Only completed wires support return requests."
+                doc_url: "https://api.cassandra.bank/docs/errors/return-request-not-allowed"
+                request_id: req_xyz789
+                resource_id: wire_4nRb7mKqWsT3xLpJ9vYz
+                resource_type: wire_transfer
