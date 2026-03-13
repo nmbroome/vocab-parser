@@ -1026,6 +1026,513 @@ components:
           maxLength: 500
           description: Required when lock_type is not `none`. Recorded in audit log.
 
+    # ========================================================================
+    # Account (Decision 2, 3, 7)
+    # ========================================================================
+
+    # --- Enums ---
+    AccountType:
+      type: string
+      enum: [checking, savings, money_market]
+      description: |
+        Ledger account type. Maps to 5300 account codes via the bookkeeping layer.
+        - `checking` — Share draft account (5300 code 025B)
+        - `savings` — Regular share account (5300 code 010)
+        - `money_market` — Money market share (5300 code 012)
+
+    AccountStatus:
+      type: string
+      enum: [open, frozen, closed]
+      description: |
+        Account lifecycle state.
+        - `open` — Active and operational.
+        - `frozen` — Temporarily suspended (no debits; credits may still post). Reversible.
+        - `closed` — Permanently closed (terminal). Balance must be zero.
+        Transitions: OPEN to/from FROZEN, FROZEN to CLOSED, OPEN to CLOSED.
+
+    DormancyStatus:
+      type: string
+      enum: [active, dormant, abandoned]
+      description: |
+        Orthogonal dormancy classification, tracked independently of account status.
+        Driven by state-specific inactivity periods (typically 12 months dormant,
+        3-5 years abandoned). Controls CD-07 (Dormancy Monitoring) and
+        CD-08 (Escheatment) evaluate this flag.
+
+    FboClassification:
+      type: string
+      enum: [customer_balance, commingled_cash, settlement]
+      description: |
+        FBO sub-account classification for the bookkeeping layer.
+        - `customer_balance` — Holds attributed to a specific end-user entity.
+        - `commingled_cash` — Pooled operational funds (e.g., partner float).
+        - `settlement` — Funds in transit for Fed settlement.
+
+    # --- Blnk Balance Fields (read-only, sourced from Blnk Deploy) ---
+    BlnkBalances:
+      type: object
+      readOnly: true
+      description: |
+        Balance fields sourced from the Blnk Deploy ledger. These are read-only
+        computed values — all mutations happen through transaction endpoints.
+        Amounts are in the smallest currency unit (cents for USD).
+      x-source: blnk
+      properties:
+        balance:
+          type: integer
+          format: int64
+          readOnly: true
+          description: Current available balance (cents). Credits minus debits, excluding inflight.
+          x-source: blnk
+        credit_balance:
+          type: integer
+          format: int64
+          readOnly: true
+          description: Lifetime credit total (cents).
+          x-source: blnk
+        debit_balance:
+          type: integer
+          format: int64
+          readOnly: true
+          description: Lifetime debit total (cents).
+          x-source: blnk
+        inflight_balance:
+          type: integer
+          format: int64
+          readOnly: true
+          description: |
+            Net pending transaction amount (cents). Represents authorized but
+            unsettled transactions (e.g., card authorizations). Managed by Blnk's
+            QUEUED to INFLIGHT to APPLIED/VOID/REJECTED lifecycle.
+          x-source: blnk
+        inflight_credit_balance:
+          type: integer
+          format: int64
+          readOnly: true
+          description: Pending inbound credits (cents).
+          x-source: blnk
+        inflight_debit_balance:
+          type: integer
+          format: int64
+          readOnly: true
+          description: Pending outbound debits (cents).
+          x-source: blnk
+
+    # --- Bookkeeping Tags (our shadow layer, Decision 3) ---
+    BookkeepingTags:
+      type: object
+      description: |
+        Shadow bookkeeping layer fields for 5300 regulatory reporting and FBO
+        segregation. These are managed by Cassandra, not sourced from Blnk.
+      properties:
+        account_code_5300:
+          type: string
+          description: |
+            NCUA 5300 account code (e.g., 025B for share drafts, 010 for
+            regular shares). Assigned automatically based on account type;
+            overridable by compliance officer.
+          examples:
+            - "025B"
+            - "010"
+            - "012"
+        schedule_a_code:
+          type: string
+          description: |
+            5300 Schedule A line item code for balance sheet classification.
+            Used by the 5300 Reporter consumer for aggregated reporting.
+          examples:
+            - "schedule_a.assets.cash"
+            - "schedule_a.shares.regular"
+        fbo_classification:
+          $ref: "#/components/schemas/FboClassification"
+        locked_amount:
+          type: integer
+          format: int64
+          readOnly: true
+          description: |
+            Amount held by BSA/compliance controls (cents). Separate from Blnk
+            inflight holds — this represents funds frozen by the control engine
+            (e.g., BA-05 OFAC match, fraud investigation). Reduces effective
+            available balance as effective_available = balance - locked_amount.
+
+    # --- Account Owner ---
+    AccountOwner:
+      type: object
+      required: [entity_id]
+      properties:
+        entity_id:
+          type: string
+          description: |
+            ID of the owning entity. Can be a person, business, trust, or joint entity.
+            For joint accounts, reference the joint entity — its members are the
+            beneficial owners. Multiple owners are supported for complex structures
+            (e.g., a business account with a personal guarantor).
+        role:
+          type: string
+          enum: [primary, authorized_signer, beneficiary, guarantor]
+          default: primary
+          description: The owner's role on this account.
+
+    # --- Account Number Summary (embedded in Account response) ---
+    AccountNumberSummary:
+      type: object
+      description: Abbreviated account number info embedded in the Account response.
+      properties:
+        id:
+          type: string
+          readOnly: true
+        account_number_masked:
+          type: string
+          readOnly: true
+          description: "Masked account number showing only the check digit."
+        routing_number:
+          type: string
+          readOnly: true
+        status:
+          $ref: "#/components/schemas/AccountNumberStatus"
+
+    # --- Account (full response) ---
+    Account:
+      type: object
+      required:
+        - id
+        - entity_id
+        - account_type
+        - status
+        - lock_type
+        - dormancy_status
+        - currency
+        - balances
+        - bookkeeping
+        - owners
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          readOnly: true
+          pattern: '^acct_[a-zA-Z0-9]{20}$'
+          description: Unique account identifier.
+          examples:
+            - acct_3rTv8mKqWsN5xLpJ7bYz
+        entity_id:
+          type: string
+          description: |
+            Primary owning entity. Immutable after creation. This is the entity
+            under which the account appears for 5300 reporting and BSA monitoring.
+        account_type:
+          $ref: "#/components/schemas/AccountType"
+        status:
+          $ref: "#/components/schemas/AccountStatus"
+        lock_type:
+          $ref: "#/components/schemas/LockType"
+        dormancy_status:
+          $ref: "#/components/schemas/DormancyStatus"
+        currency:
+          type: string
+          const: USD
+          description: ISO 4217 currency code. Only USD supported.
+        balances:
+          $ref: "#/components/schemas/BlnkBalances"
+        bookkeeping:
+          $ref: "#/components/schemas/BookkeepingTags"
+        owners:
+          type: array
+          items:
+            $ref: "#/components/schemas/AccountOwner"
+          minItems: 1
+          description: |
+            All entities with ownership or authority over this account.
+            At minimum, includes the primary owner matching entity_id.
+            Joint ownership is modeled here, not at the entity level.
+        blnk_ledger_id:
+          type: string
+          readOnly: true
+          description: Corresponding ledger ID in Blnk Deploy. Opaque reference for reconciliation.
+          x-source: blnk
+        account_numbers:
+          type: array
+          readOnly: true
+          items:
+            $ref: "#/components/schemas/AccountNumberSummary"
+          description: |
+            Summary of account numbers associated with this account.
+            Use the Account Numbers endpoints for full details and management.
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+          description: Arbitrary key-value pairs for partner use.
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    # --- Create Account ---
+    CreateAccount:
+      type: object
+      required:
+        - entity_id
+        - account_type
+      properties:
+        entity_id:
+          type: string
+          description: |
+            Primary owning entity. Must be in active status with kyc_status approved.
+            Immutable after creation.
+        account_type:
+          $ref: "#/components/schemas/AccountType"
+        owners:
+          type: array
+          items:
+            $ref: "#/components/schemas/AccountOwner"
+          description: |
+            Additional owners beyond the primary entity. If omitted, the account
+            is created with a single primary owner matching entity_id.
+        bookkeeping:
+          type: object
+          description: |
+            Optional bookkeeping overrides. If omitted, 5300 codes are assigned
+            automatically based on account_type.
+          properties:
+            account_code_5300:
+              type: string
+            schedule_a_code:
+              type: string
+            fbo_classification:
+              $ref: "#/components/schemas/FboClassification"
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+
+    # --- Update Account ---
+    UpdateAccount:
+      type: object
+      description: |
+        Partial update for an account. Immutable fields (entity_id, account_type,
+        currency) cannot be changed. Status and lock transitions use dedicated
+        action endpoints.
+      properties:
+        owners:
+          type: array
+          items:
+            $ref: "#/components/schemas/AccountOwner"
+          minItems: 1
+          description: |
+            Replace the full owners list. Must include at least one primary owner.
+            All referenced entities must exist and be in active status.
+        bookkeeping:
+          type: object
+          properties:
+            account_code_5300:
+              type: string
+            schedule_a_code:
+              type: string
+            fbo_classification:
+              $ref: "#/components/schemas/FboClassification"
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+
+    # --- Account List ---
+    AccountList:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Account"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    # --- Account Status Transition ---
+    AccountStatusTransition:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [freeze, unfreeze, close]
+          description: |
+            Requested status transition.
+            - `freeze` — Move from open to frozen. Debits blocked; credits may still post.
+            - `unfreeze` — Move from frozen to open.
+            - `close` — Move from open or frozen to closed. Terminal. Balance must be zero.
+        reason:
+          type: string
+          maxLength: 500
+          description: Required for all transitions. Recorded in audit log.
+
+    # ========================================================================
+    # Account Number (Decision 2, 20)
+    # ========================================================================
+
+    # --- Enums ---
+    AccountNumberStatus:
+      type: string
+      enum: [active, disabled, canceled]
+      description: |
+        Account number lifecycle state.
+        - `active` — Routable. Inbound payments accepted, outbound allowed.
+        - `disabled` — Temporarily non-routable (reversible). Inbound payments rejected.
+        - `canceled` — Permanently deactivated (terminal). Number is never reused.
+        Transitions: ACTIVE to/from DISABLED, ACTIVE or DISABLED to CANCELED.
+
+    # --- Account Number (full response) ---
+    AccountNumber:
+      type: object
+      required:
+        - id
+        - account_id
+        - account_number
+        - routing_number
+        - status
+        - informational_entity_id
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          readOnly: true
+          pattern: '^acctnum_[a-zA-Z0-9]{20}$'
+          description: Unique account number resource identifier.
+          examples:
+            - acctnum_9kHb4mNqRsT2xLpW6vYz
+        account_id:
+          type: string
+          description: The ledger account this number is associated with. Immutable.
+        account_number:
+          type: string
+          readOnly: true
+          pattern: '^\d{12}$'
+          description: |
+            12-digit account number allocated by the aggregator.
+            Format is PPP-SSSSSSSS-C where P is the 3-digit fintech prefix,
+            S is the 8-digit sequence, and C is the Luhn check digit.
+            Displayed with dashes for readability; transmitted as 12 contiguous
+            digits in ACH/wire files. Never reused.
+          examples:
+            - "001000000019"
+        routing_number:
+          type: string
+          readOnly: true
+          pattern: '^\d{9}$'
+          description: |
+            ABA routing number. All account numbers within a credit union share the
+            same routing number (the credit union's Fed master account routing number).
+            Inbound payments are routed to the correct fintech instance by the
+            aggregator using the 3-digit account number prefix.
+          examples:
+            - "271070801"
+        status:
+          $ref: "#/components/schemas/AccountNumberStatus"
+        informational_entity_id:
+          type: string
+          description: |
+            Entity ID for FBO attribution. Typically matches the account's primary
+            owner but can differ in BaaS scenarios where the fintech partner is the
+            account holder and end-users are tracked at the account number level.
+            Used by the bookkeeping layer for per-entity FBO segregation and
+            BSA monitoring at the account number level.
+        label:
+          type: string
+          maxLength: 100
+          description: |
+            Human-readable label for this account number (e.g., Primary Checking,
+            Partner A Routing). For partner reference only, not used in payment files.
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    # --- Create Account Number ---
+    CreateAccountNumber:
+      type: object
+      required:
+        - informational_entity_id
+      properties:
+        informational_entity_id:
+          type: string
+          description: |
+            Entity ID for FBO attribution on this account number.
+            Must reference an existing entity in active status.
+        label:
+          type: string
+          maxLength: 100
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+
+    # --- Update Account Number ---
+    UpdateAccountNumber:
+      type: object
+      description: |
+        Partial update for an account number. Only label, informational_entity_id,
+        and metadata can be modified. Status transitions use the dedicated action endpoint.
+      properties:
+        informational_entity_id:
+          type: string
+          description: Must reference an existing entity in active status.
+        label:
+          type: string
+          maxLength: 100
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+
+    # --- Account Number List ---
+    AccountNumberList:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/AccountNumber"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    # --- Account Number Status Transition ---
+    AccountNumberStatusTransition:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [disable, enable, cancel]
+          description: |
+            Requested status transition.
+            - `disable` — Move from active to disabled. Inbound payments rejected.
+            - `enable` — Move from disabled to active.
+            - `cancel` — Move to canceled from any state. Terminal. Number never reused.
+        reason:
+          type: string
+          maxLength: 500
+          description: Required for all transitions. Recorded in audit log.
+
 # ============================================================================
 # Paths — Entity
 # ============================================================================
@@ -1554,6 +2061,522 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           description: Cannot modify a compliance lock set by the control engine.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ==========================================================================
+  # Paths — Account
+  # ==========================================================================
+
+  /accounts:
+    get:
+      operationId: listAccounts
+      summary: List accounts
+      description: |
+        Returns a paginated list of accounts. Supports filtering by entity, type,
+        status, and lock type. Results ordered by `created_at` descending.
+      tags: [Accounts]
+      parameters:
+        - $ref: "#/components/parameters/PaginationLimit"
+        - $ref: "#/components/parameters/PaginationAfter"
+        - name: entity_id
+          in: query
+          schema:
+            type: string
+          description: Filter by primary owning entity.
+        - name: account_type
+          in: query
+          schema:
+            $ref: "#/components/schemas/AccountType"
+          description: Filter by account type.
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/AccountStatus"
+          description: Filter by account status.
+        - name: lock_type
+          in: query
+          schema:
+            $ref: "#/components/schemas/LockType"
+          description: Filter by lock type.
+        - name: dormancy_status
+          in: query
+          schema:
+            $ref: "#/components/schemas/DormancyStatus"
+          description: Filter by dormancy status.
+      responses:
+        "200":
+          description: Paginated list of accounts.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-API-Version:
+              $ref: "#/components/headers/X-API-Version"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+            X-RateLimit-Tier:
+              $ref: "#/components/headers/X-RateLimit-Tier"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+    post:
+      operationId: createAccount
+      summary: Create an account
+      description: |
+        Creates a new ledger account in `open` status. The primary owning entity
+        must be in `active` status with `kyc_status: approved`.
+
+        A corresponding ledger is created in Blnk Deploy. The first account number
+        is allocated automatically by the aggregator and associated with this account.
+
+        **Control gates:** CD-04 (Account Opening CDD), BA-05 (OFAC check on all owners).
+
+        **Events emitted:** `account.created`, `account_number.created`.
+      tags: [Accounts]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAccount"
+      responses:
+        "201":
+          description: Account created.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            Idempotent-Replayed:
+              $ref: "#/components/headers/Idempotent-Replayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /accounts/{account_id}:
+    get:
+      operationId: getAccount
+      summary: Retrieve an account
+      description: |
+        Returns a single account by ID, including current balances from the
+        Blnk Deploy ledger and bookkeeping layer fields.
+      tags: [Accounts]
+      parameters:
+        - name: account_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The account.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    patch:
+      operationId: updateAccount
+      summary: Update an account
+      description: |
+        Partially updates an account. Immutable fields (`entity_id`, `account_type`,
+        `currency`) cannot be changed. Balance fields are read-only — use transaction
+        endpoints to move money. Status and lock transitions use dedicated action endpoints.
+
+        Owners list is replaced in full — provide the complete desired list.
+        All referenced entities must exist and be in `active` status.
+
+        **Control gates:** CD-10 (Beneficial Ownership) re-evaluated if owners change.
+
+        **Events emitted:** `account.updated`.
+      tags: [Accounts]
+      parameters:
+        - name: account_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAccount"
+      responses:
+        "200":
+          description: Account updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /accounts/{account_id}/status:
+    post:
+      operationId: transitionAccountStatus
+      summary: Transition account status
+      description: |
+        Transitions an account's lifecycle status. Valid transitions:
+        - `open` to `frozen` (freeze)
+        - `frozen` to `open` (unfreeze)
+        - `open` or `frozen` to `closed` (close — balance must be zero)
+
+        Freezing an account blocks all debits. Credits may still post (e.g., incoming
+        ACH, refunds) to avoid payment failures for the counterparty. To block all
+        activity, combine freeze with a lock.
+
+        Closing is terminal and irreversible. All associated account numbers are
+        automatically canceled. The account number(s) are permanently retired (never reused).
+
+        **Control gates:** Account closure blocked if `locked_amount > 0` (compliance hold active).
+
+        **Events emitted:** `account.frozen`, `account.unfrozen`, `account.closed`.
+      tags: [Accounts]
+      parameters:
+        - name: account_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountStatusTransition"
+      responses:
+        "200":
+          description: Status transition applied.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            Transition not allowed from the current state, or balance is non-zero
+            for a close action, or a compliance hold is active.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                status: 409
+                type: invalid_status_transition
+                title: Invalid Status Transition
+                detail: "Cannot close account acct_3rTv8m: balance is $150.00, must be $0.00."
+                doc_url: "https://api.cassandra.bank/docs/errors/invalid-status-transition"
+                request_id: req_xyz789
+                resource_id: acct_3rTv8mKqWsN5xLpJ7bYz
+                resource_type: account
+
+  /accounts/{account_id}/lock:
+    put:
+      operationId: updateAccountLock
+      summary: Update account lock
+      description: |
+        Sets or removes the orthogonal lock on an account. Same semantics as
+        entity locks — `compliance` locks set by the control engine cannot be
+        removed via this endpoint.
+
+        A locked account restricts operations independently of status. An account
+        can be `open` but locked — preventing transfers while allowing balance queries.
+
+        **Events emitted:** `account.locked`, `account.unlocked`.
+      tags: [Accounts]
+      parameters:
+        - name: account_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EntityLockUpdate"
+      responses:
+        "200":
+          description: Lock updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Cannot modify a compliance lock set by the control engine.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ==========================================================================
+  # Paths — Account Number
+  # ==========================================================================
+
+  /accounts/{account_id}/account-numbers:
+    get:
+      operationId: listAccountNumbers
+      summary: List account numbers for an account
+      description: |
+        Returns all account numbers associated with a ledger account.
+        An account always has at least one account number (created automatically
+        on account creation).
+      tags: [Account Numbers]
+      parameters:
+        - name: account_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/PaginationLimit"
+        - $ref: "#/components/parameters/PaginationAfter"
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/AccountNumberStatus"
+          description: Filter by account number status.
+      responses:
+        "200":
+          description: Paginated list of account numbers.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountNumberList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+    post:
+      operationId: createAccountNumber
+      summary: Create an additional account number
+      description: |
+        Allocates a new 12-digit account number for an existing account. The number
+        is assigned by the aggregator using the fintech's 3-digit prefix and the
+        next available sequence. A Luhn check digit is appended.
+
+        Use this for BaaS scenarios where a single ledger account needs multiple
+        routable account numbers (e.g., per end-user in an FBO structure).
+
+        The account must be in `open` status. The `informational_entity_id` must
+        reference an existing entity in `active` status — this is the entity used
+        for FBO attribution and BSA monitoring at the account number level.
+
+        **Control gates:** BA-05 (OFAC screening on the informational entity).
+
+        **Events emitted:** `account_number.created`.
+      tags: [Account Numbers]
+      parameters:
+        - name: account_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAccountNumber"
+      responses:
+        "201":
+          description: Account number created.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            Idempotent-Replayed:
+              $ref: "#/components/headers/Idempotent-Replayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountNumber"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Account not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /account-numbers/{account_number_id}:
+    get:
+      operationId: getAccountNumber
+      summary: Retrieve an account number
+      description: |
+        Returns a single account number by its resource ID. This is a convenience
+        endpoint — account numbers are also accessible via
+        `GET /accounts/{account_id}/account-numbers`.
+      tags: [Account Numbers]
+      parameters:
+        - name: account_number_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The account number.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountNumber"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    patch:
+      operationId: updateAccountNumber
+      summary: Update an account number
+      description: |
+        Partially updates an account number. Only `label`, `informational_entity_id`,
+        and `metadata` can be modified. The account number itself, routing number,
+        and account association are immutable.
+
+        **Events emitted:** `account_number.updated`.
+      tags: [Account Numbers]
+      parameters:
+        - name: account_number_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAccountNumber"
+      responses:
+        "200":
+          description: Account number updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountNumber"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /account-numbers/{account_number_id}/status:
+    post:
+      operationId: transitionAccountNumberStatus
+      summary: Transition account number status
+      description: |
+        Transitions an account number's lifecycle status. Valid transitions:
+        - `active` to `disabled` (disable — inbound payments rejected at aggregator routing)
+        - `disabled` to `active` (enable)
+        - `active` or `disabled` to `canceled` (cancel — terminal, number permanently retired)
+
+        Disabling an account number causes the aggregator's inbound routing to
+        reject payments to this number with an ACH return code R04 (Invalid Account Number).
+        The underlying ledger account is unaffected — other account numbers on the
+        same account continue to function.
+
+        Canceling is irreversible. Per Decision 20, account numbers are never reused.
+
+        **Events emitted:** `account_number.disabled`, `account_number.enabled`, `account_number.canceled`.
+      tags: [Account Numbers]
+      parameters:
+        - name: account_number_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountNumberStatusTransition"
+      responses:
+        "200":
+          description: Status transition applied.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountNumber"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Transition not allowed from the current state.
           content:
             application/json:
               schema:
