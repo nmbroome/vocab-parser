@@ -3758,6 +3758,229 @@ components:
             When the previous signing secret stops being accepted.
             Both secrets are valid until this timestamp.
 
+    # ========================================================================
+    # Sandbox Simulation (Decision 17)
+    # ========================================================================
+
+    # --- Simulate KYC ---
+    SimulateKycRequest:
+      type: object
+      required: [entity_id]
+      properties:
+        entity_id:
+          type: string
+          description: The entity whose pending verification should be resolved.
+        verification_id:
+          type: string
+          description: |
+            Specific verification to resolve. If omitted, resolves the most
+            recent pending verification for this entity.
+
+    # --- Simulate Inbound ACH ---
+    SimulateAchReceiveRequest:
+      type: object
+      required: [account_number, amount]
+      properties:
+        account_number:
+          type: string
+          pattern: '^\d{12}$'
+          description: The 12-digit account number to receive the ACH credit.
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Inbound credit amount in cents.
+        originator_name:
+          type: string
+          maxLength: 22
+          default: "SANDBOX ORIGINATOR"
+          description: Originator name in the simulated ACH entry.
+        originator_routing_number:
+          type: string
+          pattern: '^\d{9}$'
+          default: "021000089"
+          description: Originator's routing number.
+        company_entry_description:
+          type: string
+          maxLength: 10
+          default: "PAYMENT"
+
+    # --- Simulate ACH Settlement / Return ---
+    SimulateAchSettleRequest:
+      type: object
+      required: [ach_transfer_id]
+      properties:
+        ach_transfer_id:
+          type: string
+          description: The submitted ACH transfer to settle.
+
+    SimulateAchReturnRequest:
+      type: object
+      required: [ach_transfer_id, return_code]
+      properties:
+        ach_transfer_id:
+          type: string
+          description: The settled ACH transfer to return.
+        return_code:
+          type: string
+          description: NACHA return code (e.g., R01, R02, R03, R04, R08, R10, R29).
+          examples:
+            - "R01"
+
+    # --- Simulate Inbound Wire ---
+    SimulateWireReceiveRequest:
+      type: object
+      required: [account_number, amount]
+      properties:
+        account_number:
+          type: string
+          pattern: '^\d{12}$'
+          description: The 12-digit account number to receive the wire.
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Inbound wire amount in cents.
+        originator_name:
+          type: string
+          maxLength: 35
+          default: "SANDBOX WIRE ORIGINATOR"
+        originator_routing_number:
+          type: string
+          pattern: '^\d{9}$'
+          default: "021000089"
+        originator_account_number:
+          type: string
+          default: "9876543210"
+        purpose:
+          type: string
+          maxLength: 140
+          default: "Sandbox test wire"
+
+    # --- Simulate Wire Settlement ---
+    SimulateWireSettleRequest:
+      type: object
+      required: [wire_transfer_id]
+      properties:
+        wire_transfer_id:
+          type: string
+          description: The submitted outbound wire to complete.
+
+    # --- Simulate Card Authorization ---
+    SimulateCardAuthorizeRequest:
+      type: object
+      required: [card_id, amount]
+      properties:
+        card_id:
+          type: string
+          description: The active card to authorize against.
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Authorization amount in cents.
+        merchant_name:
+          type: string
+          maxLength: 40
+          default: "SANDBOX MERCHANT"
+        merchant_mcc:
+          type: string
+          pattern: '^\d{4}$'
+          default: "5411"
+          description: Merchant Category Code. Default 5411 (grocery stores).
+        merchant_city:
+          type: string
+          default: "San Francisco"
+        merchant_state:
+          type: string
+          default: "CA"
+        force_decline:
+          type: boolean
+          default: false
+          description: |
+            If true, the control engine still evaluates but the processor
+            returns a decline regardless. Useful for testing decline handling.
+
+    # --- Simulate Card Settlement ---
+    SimulateCardSettleRequest:
+      type: object
+      required: [authorization_id]
+      properties:
+        authorization_id:
+          type: string
+          description: The approved card authorization to settle.
+        settlement_amount:
+          type: integer
+          format: int64
+          minimum: 1
+          description: |
+            Final settlement amount in cents. If omitted, settles at the
+            original authorization amount. Can differ from auth amount
+            (e.g., tip added, partial fulfillment).
+
+    # --- Simulate Time Advance ---
+    SimulateTimeAdvanceRequest:
+      type: object
+      required: [hours]
+      properties:
+        hours:
+          type: integer
+          minimum: 1
+          maximum: 720
+          description: |
+            Number of hours to advance the sandbox clock. Triggers time-dependent
+            processing: ACH settlement windows, card authorization expiry,
+            dormancy checks, CDD refresh expiry, and scheduled consumer runs.
+            Maximum 720 hours (30 days).
+
+    # --- Sandbox Reset ---
+    SandboxResetRequest:
+      type: object
+      properties:
+        confirm:
+          type: boolean
+          description: |
+            Must be `true` to confirm the reset. This is a destructive operation
+            that deletes all data in the sandbox instance.
+
+    # --- Sandbox Operation Result ---
+    SandboxSimulationResult:
+      type: object
+      readOnly: true
+      description: |
+        Result of a sandbox simulation operation. Contains the affected resource(s)
+        and any events that were emitted as a result of the simulation.
+      properties:
+        success:
+          type: boolean
+          readOnly: true
+        resource_type:
+          type: string
+          readOnly: true
+          description: Type of the primary affected resource.
+        resource_id:
+          type: string
+          readOnly: true
+          description: ID of the primary affected resource.
+        resource:
+          type: object
+          readOnly: true
+          description: |
+            The affected resource in its new state (same schema as the
+            corresponding GET endpoint).
+        events_emitted:
+          type: array
+          readOnly: true
+          items:
+            type: string
+          description: |
+            Event types emitted by this simulation (e.g., ["ach_transfer.settled"]).
+            These events are delivered to webhook endpoints normally.
+        message:
+          type: string
+          readOnly: true
+          description: Human-readable description of what the simulation did.
+
 # ============================================================================
 # Paths — Entity
 # ============================================================================
@@ -6819,3 +7042,448 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  # ==========================================================================
+  # Paths — Sandbox Simulation (sandbox environment only)
+  # ==========================================================================
+
+  /sandbox/simulate/kyc/approve:
+    post:
+      operationId: simulateKycApprove
+      summary: "Simulate: Approve KYC verification"
+      description: |
+        Forces a pending KYC/KYB verification to resolve as `approved`. The
+        entity's `kyc_status` is updated to `approved`. OFAC screening is
+        simulated as `clear` (no matches).
+
+        **Sandbox only.** Returns 404 in production.
+      tags: [Sandbox]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SimulateKycRequest"
+      responses:
+        "200":
+          description: Verification approved.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxSimulationResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: No pending verification found for this entity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /sandbox/simulate/kyc/deny:
+    post:
+      operationId: simulateKycDeny
+      summary: "Simulate: Deny KYC verification"
+      description: |
+        Forces a pending KYC/KYB verification to resolve as `denied`. The
+        entity's `kyc_status` is updated to `denied` with a simulated
+        denial reason of `identity_not_verified`.
+
+        **Sandbox only.** Returns 404 in production.
+      tags: [Sandbox]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SimulateKycRequest"
+      responses:
+        "200":
+          description: Verification denied.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxSimulationResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: No pending verification found for this entity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /sandbox/simulate/ach/receive:
+    post:
+      operationId: simulateAchReceive
+      summary: "Simulate: Receive an inbound ACH credit"
+      description: |
+        Simulates an inbound ACH credit arriving from an external bank. Creates
+        the ACH transfer resource in `settled` status (inbound ACH settles
+        immediately in sandbox), credits the target account, and generates
+        bookkeeping entries.
+
+        The account number must exist and be in `active` status. The account
+        it belongs to must be `open`.
+
+        **Sandbox only.** Returns 404 in production.
+      tags: [Sandbox]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SimulateAchReceiveRequest"
+      responses:
+        "200":
+          description: Inbound ACH received and settled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxSimulationResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          description: Account number not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /sandbox/simulate/ach/settle:
+    post:
+      operationId: simulateAchSettle
+      summary: "Simulate: Settle an outbound ACH transfer"
+      description: |
+        Forces a submitted outbound ACH transfer to settle immediately, bypassing
+        the realistic Fed timing that sandbox applies by default. The transfer
+        moves from `submitted` to `settled`.
+
+        **Sandbox only.** Returns 404 in production.
+      tags: [Sandbox]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SimulateAchSettleRequest"
+      responses:
+        "200":
+          description: ACH transfer settled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxSimulationResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Transfer is not in `submitted` status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /sandbox/simulate/ach/return:
+    post:
+      operationId: simulateAchReturn
+      summary: "Simulate: Return a settled ACH transfer"
+      description: |
+        Simulates an ACH return from the receiving bank. The transfer moves
+        from `settled` to `returned` with the specified NACHA return code.
+        Funds are reversed (debit for returned credits, credit for returned debits).
+
+        Common return codes for testing:
+        - `R01` — Insufficient Funds
+        - `R02` — Account Closed
+        - `R03` — No Account / Unable to Locate
+        - `R04` — Invalid Account Number
+        - `R08` — Payment Stopped
+        - `R10` — Customer Advises Unauthorized
+        - `R29` — Corporate Customer Advises Not Authorized
+
+        **Sandbox only.** Returns 404 in production.
+      tags: [Sandbox]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SimulateAchReturnRequest"
+      responses:
+        "200":
+          description: ACH transfer returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxSimulationResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Transfer is not in `settled` status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /sandbox/simulate/wire/receive:
+    post:
+      operationId: simulateWireReceive
+      summary: "Simulate: Receive an inbound wire"
+      description: |
+        Simulates an inbound Fedwire message arriving at the credit union. Creates
+        a wire transfer resource in `completed` status (inbound wires complete
+        immediately), credits the target account, and generates bookkeeping entries.
+
+        The IMAD and OMAD are auto-generated with sandbox-prefixed values.
+
+        **Sandbox only.** Returns 404 in production.
+      tags: [Sandbox]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SimulateWireReceiveRequest"
+      responses:
+        "200":
+          description: Inbound wire received and completed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxSimulationResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          description: Account number not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /sandbox/simulate/wire/settle:
+    post:
+      operationId: simulateWireSettle
+      summary: "Simulate: Complete an outbound wire"
+      description: |
+        Forces a submitted outbound wire to complete immediately. The transfer
+        moves from `submitted` to `completed`. IMAD and OMAD are populated
+        with sandbox-prefixed values.
+
+        **Sandbox only.** Returns 404 in production.
+      tags: [Sandbox]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SimulateWireSettleRequest"
+      responses:
+        "200":
+          description: Wire transfer completed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxSimulationResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Wire is not in `submitted` status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /sandbox/simulate/card/authorize:
+    post:
+      operationId: simulateCardAuthorize
+      summary: "Simulate: Card authorization"
+      description: |
+        Simulates a card authorization from the processor. The control engine
+        evaluates the authorization normally (balance check, velocity, OFAC,
+        fraud, spend controls, MCC filtering). If approved, an inflight hold
+        is created in Blnk.
+
+        Set `force_decline: true` to simulate a processor-side decline
+        regardless of control engine results — useful for testing decline
+        handling in partner UIs.
+
+        The 2-second timeout from Decision 10 is not enforced in sandbox —
+        the control engine runs synchronously for debuggability.
+
+        **Sandbox only.** Returns 404 in production.
+      tags: [Sandbox]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SimulateCardAuthorizeRequest"
+      responses:
+        "200":
+          description: |
+            Authorization processed. Check `resource.status` for `approved`
+            or `declined` and `resource.control_results` for evaluation details.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxSimulationResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Card is not in `active` status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /sandbox/simulate/card/settle:
+    post:
+      operationId: simulateCardSettle
+      summary: "Simulate: Card settlement"
+      description: |
+        Simulates the processor sending a settlement for an approved card
+        authorization. The inflight hold in Blnk commits and the authorization
+        moves to `settled` status. Settlement amount can differ from the
+        authorization amount (tip, partial fulfillment).
+
+        If `settlement_amount` is omitted, settles at the original authorization
+        amount.
+
+        **Sandbox only.** Returns 404 in production.
+      tags: [Sandbox]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SimulateCardSettleRequest"
+      responses:
+        "200":
+          description: Card authorization settled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxSimulationResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Authorization is not in `approved` status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /sandbox/simulate/time/advance:
+    post:
+      operationId: simulateTimeAdvance
+      summary: "Simulate: Advance sandbox clock"
+      description: |
+        Advances the sandbox clock by the specified number of hours. This
+        triggers all time-dependent processing that would occur during
+        that period:
+
+        - ACH settlement windows fire (submitted transfers settle)
+        - Card authorization expiry (7-30 day holds expire)
+        - Dormancy checks run (accounts with no activity transition to dormant)
+        - CDD verification expiry (expired verifications update kyc_status)
+        - Scheduled consumer runs (BSA Reporter, 5300 Reporter)
+
+        Maximum advance is 720 hours (30 days). For larger jumps, call
+        this endpoint multiple times.
+
+        Time advance is cumulative — calling with `hours: 24` twice advances
+        the sandbox 48 hours from its original real-world start time.
+
+        **Sandbox only.** Returns 404 in production.
+      tags: [Sandbox]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SimulateTimeAdvanceRequest"
+      responses:
+        "200":
+          description: |
+            Clock advanced. Response includes a summary of processing that
+            occurred during the simulated time period.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxSimulationResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /sandbox/reset:
+    post:
+      operationId: sandboxReset
+      summary: Reset sandbox environment
+      description: |
+        Destroys all data in the sandbox instance and resets to a clean state.
+        This includes all entities, accounts, transfers, cards, verifications,
+        bookkeeping entries, events, and webhook delivery history.
+
+        Webhook endpoint configurations are preserved (they are partner
+        infrastructure, not test data). The sandbox clock is reset to
+        real-world time.
+
+        **This action is irreversible.** The `confirm: true` field is required
+        as a safety check.
+
+        **Sandbox only.** Returns 404 in production.
+      tags: [Sandbox]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SandboxResetRequest"
+      responses:
+        "200":
+          description: Sandbox reset complete.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxSimulationResult"
+        "400":
+          description: "`confirm` must be `true`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
