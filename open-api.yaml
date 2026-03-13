@@ -3130,6 +3130,288 @@ components:
         pagination:
           $ref: "#/components/schemas/Pagination"
 
+    # ========================================================================
+    # Bookkeeping Entry (Decision 3 — Shadow Bookkeeping Layer)
+    # ========================================================================
+
+    # --- Enums ---
+    BookkeepingEntryType:
+      type: string
+      enum:
+        - debit
+        - credit
+        - hold_placed
+        - hold_released
+        - hold_seized
+      description: |
+        Type of bookkeeping entry.
+        - `debit` — Funds left the account (matches a Blnk debit transaction).
+        - `credit` — Funds entered the account (matches a Blnk credit transaction).
+        - `hold_placed` — Compliance hold placed by the control engine (increases locked_amount).
+        - `hold_released` — Compliance hold released (decreases locked_amount).
+        - `hold_seized` — Held funds permanently seized (e.g., forfeiture order).
+
+    BookkeepingEntrySource:
+      type: string
+      enum:
+        - ach_transfer
+        - wire_transfer
+        - book_transfer
+        - card_authorization
+        - card_settlement
+        - fee
+        - interest
+        - adjustment
+        - compliance_hold
+      description: |
+        The originating transaction type that produced this bookkeeping entry.
+        Maps 1:1 to the domain event that triggered the Blnk webhook.
+
+    # --- Bookkeeping Entry (full response) ---
+    BookkeepingEntry:
+      type: object
+      readOnly: true
+      description: |
+        An immutable bookkeeping entry created automatically on every Blnk
+        transaction webhook. Each entry carries 5300 attribution and FBO
+        classification for regulatory reporting.
+
+        Bookkeeping entries are the atoms of the 5300 Reporter consumer —
+        they are aggregated by account_code_5300 and schedule_a_code to
+        produce the real-time 5300 dashboard.
+
+        Partners cannot create, update, or delete bookkeeping entries directly.
+        They are system-generated and immutable.
+      required:
+        - id
+        - account_id
+        - entry_type
+        - source
+        - amount
+        - currency
+        - account_code_5300
+        - fbo_classification
+        - created_at
+      properties:
+        id:
+          type: string
+          readOnly: true
+          pattern: '^bke_[a-zA-Z0-9]{20}$'
+          description: Unique bookkeeping entry identifier.
+          examples:
+            - bke_9kHb4mNqRsT2xLpW6vYz
+        account_id:
+          type: string
+          readOnly: true
+          description: The ledger account this entry pertains to.
+        account_number_id:
+          type: string
+          readOnly: true
+          description: |
+            The specific account number involved (if applicable).
+            Null for account-level entries (e.g., interest, fees).
+        entity_id:
+          type: string
+          readOnly: true
+          description: |
+            The entity attributed for FBO segregation. Derived from the
+            account's primary owner or the account number's
+            informational_entity_id, depending on the transaction.
+        entry_type:
+          $ref: "#/components/schemas/BookkeepingEntryType"
+        source:
+          $ref: "#/components/schemas/BookkeepingEntrySource"
+        source_id:
+          type: string
+          readOnly: true
+          description: |
+            ID of the originating resource (e.g., ach_5kRb3m for an ACH transfer,
+            auth_2nRb7m for a card authorization). Allows joining bookkeeping
+            entries back to their source transactions.
+        amount:
+          type: integer
+          format: int64
+          readOnly: true
+          description: Entry amount in cents. Always positive — direction is conveyed by entry_type.
+        currency:
+          type: string
+          readOnly: true
+          const: USD
+        running_balance:
+          type: integer
+          format: int64
+          readOnly: true
+          description: |
+            Account balance after this entry was applied (cents). Provides a
+            verifiable audit trail — each entry's running_balance should equal the
+            previous entry's running_balance plus or minus this entry's amount.
+        account_code_5300:
+          type: string
+          readOnly: true
+          description: |
+            NCUA 5300 account code for this entry (e.g., 025B for share drafts,
+            010 for regular shares). Inherited from the account's bookkeeping tags
+            at the time the entry was created.
+          examples:
+            - "025B"
+            - "010"
+        schedule_a_code:
+          type: string
+          readOnly: true
+          description: |
+            5300 Schedule A line item code for balance sheet classification.
+            Used by the 5300 Reporter for aggregated reporting.
+          examples:
+            - "schedule_a.assets.cash"
+            - "schedule_a.shares.regular"
+        fbo_classification:
+          $ref: "#/components/schemas/FboClassification"
+        blnk_transaction_id:
+          type: string
+          readOnly: true
+          description: |
+            Corresponding Blnk Deploy transaction ID. Null for compliance hold
+            entries (which are Cassandra-native, not Blnk transactions).
+          x-source: blnk
+        description:
+          type: string
+          readOnly: true
+          description: |
+            System-generated description of the entry (e.g., "ACH credit from
+            John Doe via 271070801", "Compliance hold placed — BA-05 OFAC match").
+        effective_date:
+          type: string
+          format: date
+          readOnly: true
+          description: |
+            The business date this entry is effective for regulatory reporting.
+            May differ from created_at for entries posted after business hours
+            or for backdated adjustments.
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    # --- Bookkeeping Entry List ---
+    BookkeepingEntryList:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/BookkeepingEntry"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    # --- Bookkeeping Summary (aggregated balances by 5300 code) ---
+    BookkeepingSummaryItem:
+      type: object
+      readOnly: true
+      description: |
+        Aggregated balance for a single 5300 account code. Used for
+        reconciliation and the real-time 5300 dashboard.
+      properties:
+        account_code_5300:
+          type: string
+          readOnly: true
+        schedule_a_code:
+          type: string
+          readOnly: true
+        fbo_classification:
+          $ref: "#/components/schemas/FboClassification"
+        total_balance:
+          type: integer
+          format: int64
+          readOnly: true
+          description: Sum of all account balances tagged with this code (cents).
+        account_count:
+          type: integer
+          readOnly: true
+          description: Number of accounts tagged with this code.
+        total_locked:
+          type: integer
+          format: int64
+          readOnly: true
+          description: Sum of locked_amount across all accounts tagged with this code (cents).
+
+    BookkeepingSummary:
+      type: object
+      readOnly: true
+      required: [data, as_of]
+      description: |
+        Aggregated bookkeeping summary grouped by 5300 account code. This is
+        the data that feeds the real-time 5300 dashboard — a live view of
+        the credit union's balance sheet categorization.
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/BookkeepingSummaryItem"
+        as_of:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Timestamp when this summary was computed.
+        total_balance:
+          type: integer
+          format: int64
+          readOnly: true
+          description: Grand total across all 5300 codes (cents). Should equal the sum of all account balances.
+        total_locked:
+          type: integer
+          format: int64
+          readOnly: true
+          description: Grand total of compliance-held funds across all accounts (cents).
+
+    # --- Reconciliation Check ---
+    ReconciliationResult:
+      type: object
+      readOnly: true
+      description: |
+        Result of a reconciliation check between the Blnk Deploy ledger and
+        the bookkeeping layer. Any discrepancy indicates a missed webhook or
+        a bookkeeping layer bug and should trigger an alert.
+      required: [status, checked_at]
+      properties:
+        status:
+          type: string
+          readOnly: true
+          enum: [balanced, discrepancy]
+          description: |
+            - `balanced` — Blnk ledger balances match bookkeeping layer balances.
+            - `discrepancy` — One or more accounts have mismatched balances.
+        checked_at:
+          type: string
+          format: date-time
+          readOnly: true
+        accounts_checked:
+          type: integer
+          readOnly: true
+        accounts_balanced:
+          type: integer
+          readOnly: true
+        discrepancies:
+          type: array
+          readOnly: true
+          items:
+            type: object
+            properties:
+              account_id:
+                type: string
+              blnk_balance:
+                type: integer
+                format: int64
+                description: Balance according to Blnk Deploy (cents).
+              bookkeeping_balance:
+                type: integer
+                format: int64
+                description: Running balance in the bookkeeping layer (cents).
+              difference:
+                type: integer
+                format: int64
+                description: blnk_balance minus bookkeeping_balance (cents).
+
 # ============================================================================
 # Paths — Entity
 # ============================================================================
@@ -5562,3 +5844,196 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  # ==========================================================================
+  # Paths — Bookkeeping
+  # ==========================================================================
+
+  /accounts/{account_id}/bookkeeping-entries:
+    get:
+      operationId: listBookkeepingEntries
+      summary: List bookkeeping entries for an account
+      description: |
+        Returns a paginated list of bookkeeping entries for a specific account.
+        Entries are immutable and system-generated — one is created for every
+        Blnk transaction webhook plus compliance hold events.
+
+        Results are ordered by `created_at` descending (most recent first).
+
+        This is the detailed audit trail that feeds the 5300 Reporter consumer.
+        Each entry carries 5300 account code tagging, FBO classification, and
+        a running balance for verifiable reconciliation.
+      tags: [Bookkeeping]
+      parameters:
+        - name: account_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/PaginationLimit"
+        - $ref: "#/components/parameters/PaginationAfter"
+        - name: entry_type
+          in: query
+          schema:
+            $ref: "#/components/schemas/BookkeepingEntryType"
+          description: Filter by entry type (debit, credit, hold_placed, etc.).
+        - name: source
+          in: query
+          schema:
+            $ref: "#/components/schemas/BookkeepingEntrySource"
+          description: Filter by originating transaction type.
+        - name: effective_date_from
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Only return entries with effective_date on or after this date.
+        - name: effective_date_to
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Only return entries with effective_date on or before this date.
+      responses:
+        "200":
+          description: Paginated list of bookkeeping entries.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-API-Version:
+              $ref: "#/components/headers/X-API-Version"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+            X-RateLimit-Tier:
+              $ref: "#/components/headers/X-RateLimit-Tier"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BookkeepingEntryList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /bookkeeping-entries/{entry_id}:
+    get:
+      operationId: getBookkeepingEntry
+      summary: Retrieve a bookkeeping entry
+      description: |
+        Returns a single bookkeeping entry by ID. Includes the full 5300 attribution,
+        FBO classification, running balance, and source transaction reference.
+      tags: [Bookkeeping]
+      parameters:
+        - name: entry_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The bookkeeping entry.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BookkeepingEntry"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /bookkeeping/summary:
+    get:
+      operationId: getBookkeepingSummary
+      summary: Get aggregated bookkeeping summary
+      description: |
+        Returns aggregated balances grouped by 5300 account code. This is the
+        data that feeds the real-time 5300 dashboard — a live snapshot of the
+        instance's balance sheet categorization.
+
+        Each item in the response represents one 5300 code with:
+        - Total balance across all accounts tagged with that code
+        - Number of accounts
+        - Total compliance-held (locked) amount
+
+        The grand totals provide a single-number reconciliation check:
+        `total_balance` should equal the sum of all Blnk account balances
+        in this instance.
+
+        **Caching:** This endpoint computes aggregates on-demand from the
+        bookkeeping layer. For high-frequency polling, results are cached
+        for up to 30 seconds.
+      tags: [Bookkeeping]
+      parameters:
+        - name: fbo_classification
+          in: query
+          schema:
+            $ref: "#/components/schemas/FboClassification"
+          description: Filter summary to a specific FBO classification.
+        - name: as_of
+          in: query
+          schema:
+            type: string
+            format: date
+          description: |
+            Compute summary as of a specific business date. If omitted,
+            returns the current real-time summary. Useful for end-of-day
+            reconciliation and historical reporting.
+      responses:
+        "200":
+          description: Aggregated bookkeeping summary.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BookkeepingSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /bookkeeping/reconciliation:
+    get:
+      operationId: getReconciliation
+      summary: Run reconciliation check
+      description: |
+        Compares Blnk Deploy ledger balances against the bookkeeping layer's
+        running balances for every account in this instance. Any discrepancy
+        indicates a missed Blnk webhook or a bookkeeping layer bug.
+
+        This endpoint implements Decision 25's "reconciliation heartbeat" —
+        the belt-and-suspenders check that compensates for Blnk Deploy's
+        opaque webhook delivery.
+
+        When discrepancies are found, the response includes per-account
+        details showing the Blnk balance, bookkeeping balance, and difference.
+
+        **Performance:** This endpoint calls Blnk's transaction list API for
+        each account with a discrepancy. For instances with many accounts,
+        the response may take several seconds. Use the summary endpoint for
+        quick checks and this endpoint for full verification.
+      tags: [Bookkeeping]
+      responses:
+        "200":
+          description: Reconciliation result.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReconciliationResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
