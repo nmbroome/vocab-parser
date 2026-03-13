@@ -3412,6 +3412,352 @@ components:
                 format: int64
                 description: blnk_balance minus bookkeeping_balance (cents).
 
+    # ========================================================================
+    # Event (Decision 15)
+    # ========================================================================
+
+    EventType:
+      type: string
+      description: |
+        Domain event type. Events are emitted on every state transition and
+        significant operation. Partners receive these via webhook delivery.
+      enum:
+        # Entity
+        - entity.created
+        - entity.activated
+        - entity.disabled
+        - entity.archived
+        - entity.updated
+        - entity.locked
+        - entity.unlocked
+        # Account
+        - account.created
+        - account.updated
+        - account.frozen
+        - account.unfrozen
+        - account.closed
+        - account.locked
+        - account.unlocked
+        # Account Number
+        - account_number.created
+        - account_number.updated
+        - account_number.disabled
+        - account_number.enabled
+        - account_number.canceled
+        # ACH Transfer
+        - ach_transfer.created
+        - ach_transfer.submitted
+        - ach_transfer.settled
+        - ach_transfer.returned
+        - ach_transfer.rejected
+        - ach_transfer.canceled
+        # Wire Transfer
+        - wire_transfer.created
+        - wire_transfer.submitted
+        - wire_transfer.completed
+        - wire_transfer.return_requested
+        - wire_transfer.returned
+        - wire_transfer.return_denied
+        - wire_transfer.rejected
+        - wire_transfer.canceled
+        # Book Transfer
+        - book_transfer.completed
+        - book_transfer.rejected
+        # Card
+        - card.created
+        - card.activated
+        - card.frozen
+        - card.unfrozen
+        - card.closed
+        - card.updated
+        - card.sensitive_accessed
+        # Card Authorization
+        - card_authorization.approved
+        - card_authorization.declined
+        - card_authorization.settled
+        - card_authorization.reversed
+        - card_authorization.expired
+        # KYC Verification
+        - verification.initiated
+        - verification.approved
+        - verification.denied
+        - verification.in_review
+        - verification.expired
+        - verification.attestation_submitted
+        # Bookkeeping
+        - bookkeeping.hold_placed
+        - bookkeeping.hold_released
+        - bookkeeping.hold_seized
+        - bookkeeping.reconciliation_discrepancy
+
+    EventDeliveryStatus:
+      type: string
+      enum: [pending, delivered, failed, expired]
+      description: |
+        Delivery status for a specific webhook delivery attempt.
+        - `pending` — Queued for delivery (or retrying).
+        - `delivered` — Partner endpoint returned 2xx.
+        - `failed` — Delivery failed after all 12 retry attempts over 24 hours.
+        - `expired` — Event aged out of the delivery window without successful delivery.
+
+    # --- Event (full response) ---
+    Event:
+      type: object
+      readOnly: true
+      required:
+        - id
+        - type
+        - resource_id
+        - resource_type
+        - created_at
+      properties:
+        id:
+          type: string
+          readOnly: true
+          pattern: '^evt_[a-zA-Z0-9]{20}$'
+          description: Unique event identifier.
+          examples:
+            - evt_5kRb3mNqWsT8xLpJ2vYz
+        type:
+          $ref: "#/components/schemas/EventType"
+        resource_id:
+          type: string
+          readOnly: true
+          description: ID of the resource that changed (e.g., ent_abc123, acct_xyz789).
+        resource_type:
+          type: string
+          readOnly: true
+          description: Type of the resource (e.g., entity, account, ach_transfer).
+        data:
+          type: object
+          readOnly: true
+          description: |
+            Snapshot of the resource at the time of the event. Contains the full
+            resource representation (same schema as the corresponding GET endpoint).
+            For update events, this is the state after the change.
+        previous_data:
+          type: object
+          readOnly: true
+          description: |
+            For update events, the resource state before the change. Only includes
+            fields that changed. Null for creation events.
+        delivery_status:
+          $ref: "#/components/schemas/EventDeliveryStatus"
+        delivery_attempts:
+          type: integer
+          readOnly: true
+          description: Number of webhook delivery attempts made so far (max 12).
+        last_delivery_attempt_at:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Timestamp of the most recent delivery attempt.
+        delivered_at:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Timestamp of successful delivery. Null if not yet delivered.
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    # --- Event List ---
+    EventList:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Event"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    # ========================================================================
+    # Webhook Endpoint (Decision 15)
+    # ========================================================================
+
+    WebhookEndpointStatus:
+      type: string
+      enum: [active, disabled]
+      description: |
+        - `active` — Events are delivered to this endpoint.
+        - `disabled` — Delivery is paused. Events accumulate and can be
+          retrieved via the backfill endpoint.
+
+    # --- Webhook Endpoint (full response) ---
+    WebhookEndpoint:
+      type: object
+      required:
+        - id
+        - url
+        - status
+        - subscribed_events
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          readOnly: true
+          pattern: '^whep_[a-zA-Z0-9]{20}$'
+          description: Unique webhook endpoint identifier.
+          examples:
+            - whep_7kFb2mNqRsT9xLpW4vYz
+        url:
+          type: string
+          format: uri
+          description: |
+            The HTTPS URL that receives webhook POST requests. Must use HTTPS
+            (HTTP rejected). Must return 2xx within 30 seconds to be considered
+            a successful delivery.
+        status:
+          $ref: "#/components/schemas/WebhookEndpointStatus"
+        subscribed_events:
+          type: array
+          items:
+            type: string
+          description: |
+            List of event type patterns this endpoint receives. Supports exact
+            types (e.g., "ach_transfer.settled") and wildcard prefixes
+            (e.g., "ach_transfer.*", "entity.*"). Use ["*"] to subscribe to
+            all events.
+          examples:
+            - ["*"]
+            - ["ach_transfer.*", "wire_transfer.*", "entity.activated"]
+        signing_secret:
+          type: string
+          readOnly: true
+          description: |
+            HMAC-SHA256 signing secret for verifying webhook payloads. Only
+            returned once at creation time. Use to verify the
+            `X-Cassandra-Signature` header on incoming webhooks.
+
+            Signature format: `t=<unix_timestamp>,v1=<hmac_sha256_hex>`
+
+            Verification:
+            1. Extract `t` and `v1` from the header.
+            2. Compute HMAC-SHA256 of `<t>.<raw_request_body>` using this secret.
+            3. Compare the computed signature to `v1`.
+            4. Reject if `t` is more than 5 minutes old (replay protection).
+        delivery_stats:
+          type: object
+          readOnly: true
+          description: Rolling delivery statistics for this endpoint.
+          properties:
+            total_delivered:
+              type: integer
+              readOnly: true
+            total_failed:
+              type: integer
+              readOnly: true
+            last_delivered_at:
+              type: string
+              format: date-time
+              readOnly: true
+            last_failed_at:
+              type: string
+              format: date-time
+              readOnly: true
+            current_failure_streak:
+              type: integer
+              readOnly: true
+              description: |
+                Consecutive failed deliveries. When this reaches a threshold,
+                the endpoint may be automatically disabled and the partner alerted.
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    # --- Create Webhook Endpoint ---
+    CreateWebhookEndpoint:
+      type: object
+      required:
+        - url
+        - subscribed_events
+      properties:
+        url:
+          type: string
+          format: uri
+          description: HTTPS URL to receive webhook POST requests.
+        subscribed_events:
+          type: array
+          items:
+            type: string
+          minItems: 1
+          description: |
+            Event type patterns to subscribe to. Supports exact types and
+            wildcard prefixes (e.g., "entity.*"). Use ["*"] for all events.
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+
+    # --- Update Webhook Endpoint ---
+    UpdateWebhookEndpoint:
+      type: object
+      description: |
+        Partial update for a webhook endpoint. URL, subscribed events, and
+        status can all be modified. Changing the URL does not rotate the
+        signing secret — use the dedicated rotate-secret endpoint for that.
+      properties:
+        url:
+          type: string
+          format: uri
+        subscribed_events:
+          type: array
+          items:
+            type: string
+          minItems: 1
+        status:
+          $ref: "#/components/schemas/WebhookEndpointStatus"
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+
+    # --- Webhook Endpoint List ---
+    WebhookEndpointList:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/WebhookEndpoint"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    # --- Webhook Signing Secret (returned on rotation) ---
+    WebhookSigningSecret:
+      type: object
+      required: [signing_secret]
+      properties:
+        signing_secret:
+          type: string
+          description: |
+            The new HMAC-SHA256 signing secret. Returned only once — store
+            securely. The previous secret remains valid for 24 hours to allow
+            a graceful rollover (both old and new signatures are accepted).
+        previous_secret_expires_at:
+          type: string
+          format: date-time
+          description: |
+            When the previous signing secret stops being accepted.
+            Both secrets are valid until this timestamp.
+
 # ============================================================================
 # Paths — Entity
 # ============================================================================
@@ -6037,3 +6383,439 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "429":
           $ref: "#/components/responses/TooManyRequests"
+
+  # ==========================================================================
+  # Paths — Events
+  # ==========================================================================
+
+  /events:
+    get:
+      operationId: listEvents
+      summary: List events
+      description: |
+        Returns a paginated list of events. This is the backfill endpoint
+        referenced in Decision 15 — when webhook delivery fails after 24 hours,
+        partners use this endpoint to retrieve missed events.
+
+        Supports filtering by event type, resource, delivery status, and time
+        range. Results ordered by `created_at` ascending (oldest first) by
+        default — this is intentional for backfill scenarios where partners
+        process events sequentially.
+
+        Events are retained for 30 days. For older events, use the
+        `created_before` / `created_after` filters to page through history.
+      tags: [Events]
+      parameters:
+        - $ref: "#/components/parameters/PaginationLimit"
+        - $ref: "#/components/parameters/PaginationAfter"
+        - name: type
+          in: query
+          schema:
+            type: string
+          description: |
+            Filter by event type. Supports exact match (e.g., "ach_transfer.settled")
+            and wildcard prefix (e.g., "ach_transfer.*").
+        - name: resource_id
+          in: query
+          schema:
+            type: string
+          description: Filter by the resource that triggered the event.
+        - name: resource_type
+          in: query
+          schema:
+            type: string
+          description: Filter by resource type (e.g., entity, account, ach_transfer).
+        - name: delivery_status
+          in: query
+          schema:
+            $ref: "#/components/schemas/EventDeliveryStatus"
+          description: Filter by delivery status. Use `failed` to find undelivered events.
+        - name: created_after
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Only return events created after this timestamp (inclusive).
+        - name: created_before
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Only return events created before this timestamp (inclusive).
+      responses:
+        "200":
+          description: Paginated list of events.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-API-Version:
+              $ref: "#/components/headers/X-API-Version"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+            X-RateLimit-Tier:
+              $ref: "#/components/headers/X-RateLimit-Tier"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /events/{event_id}:
+    get:
+      operationId: getEvent
+      summary: Retrieve an event
+      description: |
+        Returns a single event by ID. Includes the full resource snapshot (`data`),
+        the previous state for update events (`previous_data`), and delivery status.
+      tags: [Events]
+      parameters:
+        - name: event_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The event.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Event"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /events/{event_id}/retry:
+    post:
+      operationId: retryEventDelivery
+      summary: Retry event delivery
+      description: |
+        Manually triggers a retry of webhook delivery for a specific event.
+        Useful when a partner has fixed their endpoint and wants to receive
+        events that previously failed delivery.
+
+        Only events in `failed` or `expired` delivery status can be retried.
+        The retry resets the delivery attempt counter and queues the event for
+        immediate delivery to all active webhook endpoints subscribed to this
+        event type.
+
+        **Events in `delivered` status cannot be retried** — use the GET
+        endpoint to retrieve the event data directly if you need to reprocess.
+      tags: [Events]
+      parameters:
+        - name: event_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Event re-queued for delivery.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Event"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Event is not in a retryable state (already delivered or still pending).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ==========================================================================
+  # Paths — Webhook Endpoints
+  # ==========================================================================
+
+  /webhooks:
+    get:
+      operationId: listWebhookEndpoints
+      summary: List webhook endpoints
+      description: |
+        Returns all webhook endpoints configured for this partner. Most partners
+        have one or two endpoints (production and optionally a monitoring/logging
+        endpoint).
+      tags: [Webhooks]
+      parameters:
+        - $ref: "#/components/parameters/PaginationLimit"
+        - $ref: "#/components/parameters/PaginationAfter"
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/WebhookEndpointStatus"
+          description: Filter by endpoint status.
+      responses:
+        "200":
+          description: Paginated list of webhook endpoints.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookEndpointList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+    post:
+      operationId: createWebhookEndpoint
+      summary: Create a webhook endpoint
+      description: |
+        Registers a new webhook endpoint. The response includes the `signing_secret`
+        which is only returned once — store it securely. This secret is used to
+        verify the `X-Cassandra-Signature` header on incoming webhook deliveries.
+
+        **Signature verification (HMAC-SHA256):**
+        1. Extract `t` (timestamp) and `v1` (signature) from `X-Cassandra-Signature`.
+        2. Compute `HMAC-SHA256(signing_secret, "<t>.<raw_body>")`.
+        3. Compare to `v1` (constant-time comparison).
+        4. Reject if `t` is more than 5 minutes old (replay protection).
+
+        **Delivery behavior (Decision 15):**
+        - At-least-once delivery with exponential backoff.
+        - 12 attempts over 24 hours: immediate, 30s, 1m, 2m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 8h.
+        - After 24 hours of failures: event marked as failed, partner alerted.
+        - Use `GET /events` for backfill of missed events.
+
+        The URL must use HTTPS. The endpoint must respond with 2xx within
+        30 seconds to be considered a successful delivery.
+      tags: [Webhooks]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWebhookEndpoint"
+      responses:
+        "201":
+          description: |
+            Webhook endpoint created. **Important:** The `signing_secret` in this
+            response is only returned once. Store it securely — it cannot be
+            retrieved again (only rotated).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            Idempotent-Replayed:
+              $ref: "#/components/headers/Idempotent-Replayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookEndpoint"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /webhooks/{webhook_endpoint_id}:
+    get:
+      operationId: getWebhookEndpoint
+      summary: Retrieve a webhook endpoint
+      description: |
+        Returns a single webhook endpoint by ID. Includes delivery statistics.
+        Does not return the signing secret — it is only returned at creation
+        time and on rotation.
+      tags: [Webhooks]
+      parameters:
+        - name: webhook_endpoint_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The webhook endpoint.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookEndpoint"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    patch:
+      operationId: updateWebhookEndpoint
+      summary: Update a webhook endpoint
+      description: |
+        Partially updates a webhook endpoint. URL, subscribed events, status,
+        and metadata can be modified.
+
+        Changing `status` to `disabled` pauses delivery — events continue to
+        accumulate and can be retrieved via `GET /events`. Re-enabling the
+        endpoint resumes delivery from where it left off.
+
+        Changing `subscribed_events` takes effect for new events only — events
+        already queued for delivery are not affected.
+
+        Changing the URL does not rotate the signing secret. Use the dedicated
+        `/webhooks/{id}/rotate-secret` endpoint for that.
+      tags: [Webhooks]
+      parameters:
+        - name: webhook_endpoint_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateWebhookEndpoint"
+      responses:
+        "200":
+          description: Webhook endpoint updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookEndpoint"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+    delete:
+      operationId: deleteWebhookEndpoint
+      summary: Delete a webhook endpoint
+      description: |
+        Permanently deletes a webhook endpoint. Pending deliveries for this
+        endpoint are canceled. Events themselves are not affected — they remain
+        queryable via `GET /events` and can still be delivered to other endpoints.
+
+        This action is irreversible. To temporarily stop delivery, use PATCH
+        to set `status: disabled` instead.
+      tags: [Webhooks]
+      parameters:
+        - name: webhook_endpoint_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Webhook endpoint deleted. No content returned.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /webhooks/{webhook_endpoint_id}/rotate-secret:
+    post:
+      operationId: rotateWebhookSecret
+      summary: Rotate webhook signing secret
+      description: |
+        Generates a new HMAC-SHA256 signing secret for this webhook endpoint.
+        The response includes the new secret (returned only once — store securely).
+
+        **Graceful rollover:** The previous secret remains valid for 24 hours
+        after rotation. During this window, webhook deliveries include signatures
+        computed with both the old and new secrets. Partners should update their
+        verification logic to accept the new secret and can stop accepting the
+        old one after 24 hours.
+
+        Rotation is recommended periodically (e.g., quarterly) and immediately
+        if the secret is compromised.
+      tags: [Webhooks]
+      parameters:
+        - name: webhook_endpoint_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: |
+            Secret rotated. The new `signing_secret` is returned only once.
+            The previous secret is valid until `previous_secret_expires_at`.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookSigningSecret"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /webhooks/{webhook_endpoint_id}/test:
+    post:
+      operationId: testWebhookEndpoint
+      summary: Send a test webhook
+      description: |
+        Sends a synthetic test event to this webhook endpoint. The test event
+        has `type: "test.ping"` and contains no real data — it verifies that
+        the endpoint URL is reachable and returns 2xx.
+
+        The delivery result is returned synchronously. If the endpoint fails
+        to respond within 30 seconds, the test returns the error details.
+
+        Test events are not persisted in the events log and do not count
+        toward delivery statistics.
+      tags: [Webhooks]
+      parameters:
+        - name: webhook_endpoint_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Test delivery result.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    description: Whether the endpoint returned 2xx.
+                  status_code:
+                    type: integer
+                    description: HTTP status code returned by the endpoint.
+                  response_time_ms:
+                    type: integer
+                    description: Response time in milliseconds.
+                  error:
+                    type: string
+                    description: Error message if delivery failed (timeout, DNS, TLS, etc.).
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
