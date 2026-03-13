@@ -2656,6 +2656,480 @@ components:
         pagination:
           $ref: "#/components/schemas/Pagination"
 
+    # ========================================================================
+    # Card (Decision 10)
+    # ========================================================================
+
+    # --- Enums ---
+    CardStatus:
+      type: string
+      enum: [inactive, active, frozen, closed]
+      description: |
+        Card lifecycle state, driven by the adapter interface
+        (createCard, activateCard, freezeCard, closeCard).
+        - `inactive` — Card created but not yet activated. Cannot be used for transactions.
+        - `active` — Card is live and can authorize transactions.
+        - `frozen` — Temporarily suspended (reversible). Authorizations are declined.
+        - `closed` — Permanently deactivated (terminal). Card number is retired.
+        Transitions: INACTIVE to ACTIVE, ACTIVE to/from FROZEN, ACTIVE or FROZEN to CLOSED.
+
+    CardType:
+      type: string
+      enum: [virtual, physical]
+      description: |
+        - `virtual` — Instantly issued, PAN available immediately via secure details endpoint.
+        - `physical` — Requires fulfillment (mailing). PAN available after activation.
+
+    CardNetwork:
+      type: string
+      enum: [visa, mastercard]
+      readOnly: true
+      description: Card network, determined by the BIN allocated to this instance.
+
+    CardFormFactor:
+      type: string
+      enum: [debit, prepaid]
+      description: |
+        Card form factor for network classification.
+        - `debit` — Linked to a deposit account with overdraft rules.
+        - `prepaid` — Balance-limited, no overdraft.
+
+    # --- Card (full response) ---
+    Card:
+      type: object
+      required:
+        - id
+        - account_id
+        - entity_id
+        - card_type
+        - form_factor
+        - status
+        - last_four
+        - expiration_month
+        - expiration_year
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          readOnly: true
+          pattern: '^card_[a-zA-Z0-9]{20}$'
+          description: Unique card identifier.
+          examples:
+            - card_6kRb3mNqWsT8xLpJ2vYz
+        account_id:
+          type: string
+          description: The ledger account this card draws from / credits to.
+        entity_id:
+          type: string
+          description: |
+            The entity this card is issued to. Must be a person entity.
+            Immutable after creation.
+        card_type:
+          $ref: "#/components/schemas/CardType"
+        form_factor:
+          $ref: "#/components/schemas/CardFormFactor"
+        network:
+          $ref: "#/components/schemas/CardNetwork"
+        status:
+          $ref: "#/components/schemas/CardStatus"
+        last_four:
+          type: string
+          readOnly: true
+          pattern: '^\d{4}$'
+          description: Last four digits of the card number (PAN).
+        expiration_month:
+          type: integer
+          readOnly: true
+          minimum: 1
+          maximum: 12
+        expiration_year:
+          type: integer
+          readOnly: true
+          description: Four-digit expiration year.
+        shipping:
+          readOnly: true
+          description: |
+            Shipping details for physical cards. Only present when `card_type`
+            is `physical`. Null for virtual cards.
+          type: object
+          properties:
+            status:
+              type: string
+              enum: [pending, shipped, delivered, returned]
+              readOnly: true
+            tracking_number:
+              type: string
+              readOnly: true
+            carrier:
+              type: string
+              readOnly: true
+            shipped_at:
+              type: string
+              format: date-time
+              readOnly: true
+            estimated_delivery:
+              type: string
+              format: date
+              readOnly: true
+        spend_controls:
+          type: object
+          description: |
+            Optional per-card spending limits. These are enforced in addition to
+            account-level controls and the control engine's velocity limits.
+          properties:
+            daily_limit:
+              type: integer
+              format: int64
+              description: Maximum daily spend in cents. Null means no per-card daily limit.
+            monthly_limit:
+              type: integer
+              format: int64
+              description: Maximum monthly spend in cents.
+            per_transaction_limit:
+              type: integer
+              format: int64
+              description: Maximum single transaction amount in cents.
+            allowed_mcc_codes:
+              type: array
+              items:
+                type: string
+                pattern: '^\d{4}$'
+              description: |
+                Whitelist of allowed Merchant Category Codes. If populated, only
+                transactions at merchants with these MCCs are approved.
+                Empty array means all MCCs allowed.
+            blocked_mcc_codes:
+              type: array
+              items:
+                type: string
+                pattern: '^\d{4}$'
+              description: |
+                Blacklist of blocked MCCs. Transactions at merchants with these
+                MCCs are declined. Evaluated after allowed_mcc_codes.
+        processor_reference:
+          type: string
+          readOnly: true
+          description: |
+            Card reference ID at the processor (Marqeta card_token or Lithic card_id).
+            Opaque — used internally for adapter operations.
+          x-source: card_processor
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    # --- Create Card ---
+    CreateCard:
+      type: object
+      required:
+        - account_id
+        - entity_id
+        - card_type
+        - form_factor
+      properties:
+        account_id:
+          type: string
+          description: |
+            Ledger account this card draws from. Must be `open` with no blocking lock.
+        entity_id:
+          type: string
+          description: |
+            Person entity this card is issued to. Must be `active` with
+            `kyc_status: approved`. The person must be an owner on the account.
+        card_type:
+          $ref: "#/components/schemas/CardType"
+        form_factor:
+          $ref: "#/components/schemas/CardFormFactor"
+        shipping_address:
+          $ref: "#/components/schemas/Address"
+          description: |
+            Required for physical cards. The address to ship the card to.
+            Ignored for virtual cards.
+        spend_controls:
+          type: object
+          description: Optional per-card spending limits.
+          properties:
+            daily_limit:
+              type: integer
+              format: int64
+            monthly_limit:
+              type: integer
+              format: int64
+            per_transaction_limit:
+              type: integer
+              format: int64
+            allowed_mcc_codes:
+              type: array
+              items:
+                type: string
+                pattern: '^\d{4}$'
+            blocked_mcc_codes:
+              type: array
+              items:
+                type: string
+                pattern: '^\d{4}$'
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+
+    # --- Update Card ---
+    UpdateCard:
+      type: object
+      description: |
+        Partial update for a card. Only spend controls and metadata can be modified.
+        Status transitions use dedicated action endpoints. Card type, account, and
+        entity are immutable.
+      properties:
+        spend_controls:
+          type: object
+          properties:
+            daily_limit:
+              type: integer
+              format: int64
+            monthly_limit:
+              type: integer
+              format: int64
+            per_transaction_limit:
+              type: integer
+              format: int64
+            allowed_mcc_codes:
+              type: array
+              items:
+                type: string
+                pattern: '^\d{4}$'
+            blocked_mcc_codes:
+              type: array
+              items:
+                type: string
+                pattern: '^\d{4}$'
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+
+    # --- Card List ---
+    CardList:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Card"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    # --- Card Status Transition ---
+    CardStatusTransition:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [activate, freeze, unfreeze, close]
+          description: |
+            Requested status transition.
+            - `activate` — Move from `inactive` to `active`. Card can begin authorizing.
+            - `freeze` — Move from `active` to `frozen`. Authorizations declined.
+            - `unfreeze` — Move from `frozen` to `active`.
+            - `close` — Move from `active` or `frozen` to `closed`. Terminal.
+        reason:
+          type: string
+          maxLength: 500
+          description: Required for `freeze` and `close` actions. Recorded in audit log.
+
+    # --- Secure Card Details (PAN, CVV, expiry) ---
+    CardSensitiveDetails:
+      type: object
+      readOnly: true
+      description: |
+        Full card details including PAN and CVV. Only accessible via the dedicated
+        secure details endpoint. Returned with short-lived access — partners should
+        display these in a PCI-compliant iframe or secure element, never store them.
+      properties:
+        card_number:
+          type: string
+          readOnly: true
+          pattern: '^\d{16}$'
+          description: Full 16-digit Primary Account Number (PAN).
+          x-pii: true
+        cvv:
+          type: string
+          readOnly: true
+          pattern: '^\d{3}$'
+          description: Card Verification Value.
+          x-pii: true
+        expiration_month:
+          type: integer
+          readOnly: true
+        expiration_year:
+          type: integer
+          readOnly: true
+
+    # ========================================================================
+    # Card Authorization (read-only, driven by processor webhooks)
+    # ========================================================================
+
+    CardAuthorizationStatus:
+      type: string
+      enum: [pending, approved, declined, reversed, expired]
+      description: |
+        Authorization lifecycle.
+        - `pending` — Authorization received, control engine evaluating (transient, sub-2-second).
+        - `approved` — Authorized. Blnk inflight hold created.
+        - `declined` — Control engine or balance check declined.
+        - `reversed` — Merchant reversed the authorization before settlement.
+        - `expired` — Authorization expired without settlement (processor-dependent, typically 7-30 days).
+
+    CardAuthorizationDeclineReason:
+      type: string
+      enum:
+        - insufficient_funds
+        - card_frozen
+        - card_closed
+        - account_frozen
+        - account_locked
+        - spend_limit_exceeded
+        - mcc_blocked
+        - ofac_match
+        - velocity_exceeded
+        - fraud_suspected
+        - processor_declined
+      description: Machine-readable reason for declining an authorization.
+
+    # --- Card Authorization ---
+    CardAuthorization:
+      type: object
+      readOnly: true
+      description: |
+        A card authorization event. These are created by the card processor's
+        real-time webhook and evaluated by the control engine within a 2-second
+        timeout. Read-only from the partner's perspective.
+      required:
+        - id
+        - card_id
+        - account_id
+        - status
+        - amount
+        - currency
+        - merchant
+        - created_at
+      properties:
+        id:
+          type: string
+          readOnly: true
+          pattern: '^auth_[a-zA-Z0-9]{20}$'
+          examples:
+            - auth_2nRb7mKqWsT3xLpJ9vYz
+        card_id:
+          type: string
+          readOnly: true
+        account_id:
+          type: string
+          readOnly: true
+        status:
+          $ref: "#/components/schemas/CardAuthorizationStatus"
+        amount:
+          type: integer
+          format: int64
+          readOnly: true
+          description: Authorization amount in cents.
+        currency:
+          type: string
+          readOnly: true
+          const: USD
+        merchant:
+          type: object
+          readOnly: true
+          description: Merchant details from the authorization request.
+          properties:
+            name:
+              type: string
+              readOnly: true
+            mcc:
+              type: string
+              readOnly: true
+              pattern: '^\d{4}$'
+              description: Merchant Category Code.
+            city:
+              type: string
+              readOnly: true
+            state:
+              type: string
+              readOnly: true
+            country:
+              type: string
+              readOnly: true
+            acceptor_id:
+              type: string
+              readOnly: true
+              description: Card acceptor ID from the processor.
+        decline_reason:
+          $ref: "#/components/schemas/CardAuthorizationDeclineReason"
+        control_results:
+          type: array
+          readOnly: true
+          items:
+            $ref: "#/components/schemas/ControlResult"
+          description: |
+            Control engine results for this authorization. Includes balance check,
+            velocity, OFAC, fraud, and spend control evaluations.
+        blnk_transaction_id:
+          type: string
+          readOnly: true
+          description: |
+            Blnk inflight transaction ID (for approved authorizations).
+            Null for declined authorizations.
+          x-source: blnk
+        processor_reference:
+          type: string
+          readOnly: true
+          description: Processor's native authorization reference.
+          x-source: card_processor
+        settled_at:
+          type: string
+          format: date-time
+          readOnly: true
+          description: |
+            Settlement timestamp. Populated when the inflight transaction commits
+            in Blnk (processor sends settlement webhook). Null until settled.
+        settlement_amount:
+          type: integer
+          format: int64
+          readOnly: true
+          description: |
+            Final settlement amount in cents. May differ from the authorization
+            amount (e.g., tip added, partial fulfillment).
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    # --- Card Authorization List ---
+    CardAuthorizationList:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/CardAuthorization"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
 # ============================================================================
 # Paths — Entity
 # ============================================================================
@@ -4696,6 +5170,394 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Verification"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ==========================================================================
+  # Paths — Card
+  # ==========================================================================
+
+  /cards:
+    get:
+      operationId: listCards
+      summary: List cards
+      description: |
+        Returns a paginated list of cards. Supports filtering by account, entity,
+        status, and card type.
+      tags: [Cards]
+      parameters:
+        - $ref: "#/components/parameters/PaginationLimit"
+        - $ref: "#/components/parameters/PaginationAfter"
+        - name: account_id
+          in: query
+          schema:
+            type: string
+          description: Filter by ledger account.
+        - name: entity_id
+          in: query
+          schema:
+            type: string
+          description: Filter by cardholder entity.
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/CardStatus"
+          description: Filter by card status.
+        - name: card_type
+          in: query
+          schema:
+            $ref: "#/components/schemas/CardType"
+          description: Filter by card type (virtual or physical).
+      responses:
+        "200":
+          description: Paginated list of cards.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-API-Version:
+              $ref: "#/components/headers/X-API-Version"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+            X-RateLimit-Tier:
+              $ref: "#/components/headers/X-RateLimit-Tier"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CardList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+    post:
+      operationId: createCard
+      summary: Create a card
+      description: |
+        Creates a new card in `inactive` status. The card is provisioned through
+        the card processor (Marqeta or Lithic) via the adapter layer.
+
+        Virtual cards are available immediately — call the secure details endpoint
+        after creation to retrieve the PAN and CVV for display in a PCI-compliant
+        element.
+
+        Physical cards enter the fulfillment pipeline. The `shipping` object on
+        the card tracks fulfillment status. Physical cards must be activated
+        (via `POST /cards/{card_id}/status`) before they can authorize transactions.
+
+        The entity must be a person (cards are issued to individuals, not businesses
+        or trusts). The person must be an owner on the specified account.
+
+        **Control gates:** BA-05 (OFAC on cardholder), CD-04 (Account CDD status).
+
+        **Events emitted:** `card.created`.
+      tags: [Cards]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCard"
+      responses:
+        "201":
+          description: Card created in `inactive` status.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            Idempotent-Replayed:
+              $ref: "#/components/headers/Idempotent-Replayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Card"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: |
+            Entity is not a person, entity is not an owner on the account,
+            account is not open, or entity/account is locked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /cards/{card_id}:
+    get:
+      operationId: getCard
+      summary: Retrieve a card
+      description: |
+        Returns a single card by ID. Does not include sensitive details (PAN, CVV) —
+        use `GET /cards/{card_id}/sensitive` for full card details.
+      tags: [Cards]
+      parameters:
+        - name: card_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The card.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Card"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    patch:
+      operationId: updateCard
+      summary: Update a card
+      description: |
+        Updates card spend controls and metadata. Card type, account, entity,
+        and network are immutable. Status transitions use the dedicated
+        action endpoint.
+
+        Spend control changes take effect on the next authorization — in-flight
+        authorizations are not affected.
+
+        **Events emitted:** `card.updated`.
+      tags: [Cards]
+      parameters:
+        - name: card_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateCard"
+      responses:
+        "200":
+          description: Card updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Card"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /cards/{card_id}/status:
+    post:
+      operationId: transitionCardStatus
+      summary: Transition card status
+      description: |
+        Transitions a card's lifecycle status. Valid transitions:
+        - `inactive` to `active` (activate — card can begin authorizing)
+        - `active` to `frozen` (freeze — authorizations declined until unfrozen)
+        - `frozen` to `active` (unfreeze)
+        - `active` or `frozen` to `closed` (close — terminal, card number retired)
+
+        Freezing a card causes the processor to decline all incoming authorizations.
+        Existing pending authorizations are not automatically voided — they expire
+        per the processor's timeout (typically 7-30 days).
+
+        Closing is irreversible. The card number is retired at the processor and
+        cannot be reissued. Any pending authorizations are voided.
+
+        **Events emitted:** `card.activated`, `card.frozen`, `card.unfrozen`, `card.closed`.
+      tags: [Cards]
+      parameters:
+        - name: card_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CardStatusTransition"
+      responses:
+        "200":
+          description: Status transition applied.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Card"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            Transition not allowed from the current state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /cards/{card_id}/sensitive:
+    get:
+      operationId: getCardSensitiveDetails
+      summary: Retrieve sensitive card details
+      description: |
+        Returns the full PAN, CVV, and expiration for a card. This endpoint exists
+        for PCI-compliant display in partner UIs (e.g., virtual card display,
+        Apple/Google Wallet provisioning).
+
+        **PCI DSS requirements:** Partners must not log, store, or persist the
+        response from this endpoint. Card details should be rendered in a secure
+        iframe or client-side element that never touches the partner's servers.
+
+        This endpoint is rate-limited more aggressively than standard read endpoints.
+        Excessive calls will trigger a security review.
+
+        Only available for cards in `inactive` (virtual only) or `active` status.
+
+        **Events emitted:** `card.sensitive_accessed` (audit trail).
+      tags: [Cards]
+      parameters:
+        - name: card_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Sensitive card details.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            Cache-Control:
+              schema:
+                type: string
+                const: "no-store, no-cache, must-revalidate"
+              description: Response must not be cached.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CardSensitiveDetails"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Card is frozen or closed — sensitive details not available.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ==========================================================================
+  # Paths — Card Authorization (read-only)
+  # ==========================================================================
+
+  /cards/{card_id}/authorizations:
+    get:
+      operationId: listCardAuthorizations
+      summary: List authorizations for a card
+      description: |
+        Returns all authorization events for a card, including approved, declined,
+        reversed, and expired authorizations. Results ordered by `created_at`
+        descending.
+
+        Authorizations are created by the card processor's real-time webhook and
+        evaluated by the control engine within a 2-second timeout (Decision 10).
+        They are read-only from the partner's perspective.
+
+        Approved authorizations create inflight holds in Blnk. When the processor
+        sends a settlement webhook, the hold commits and `settled_at` /
+        `settlement_amount` are populated. If the merchant reverses the
+        authorization, the hold is voided and status becomes `reversed`.
+      tags: [Cards]
+      parameters:
+        - name: card_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/PaginationLimit"
+        - $ref: "#/components/parameters/PaginationAfter"
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/CardAuthorizationStatus"
+          description: Filter by authorization status.
+        - name: created_after
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: created_before
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Paginated list of authorizations.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CardAuthorizationList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /authorizations/{authorization_id}:
+    get:
+      operationId: getCardAuthorization
+      summary: Retrieve a card authorization
+      description: |
+        Returns a single authorization by ID. Includes merchant details,
+        control engine results, settlement info (if settled), and decline
+        reason (if declined).
+      tags: [Cards]
+      parameters:
+        - name: authorization_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The authorization.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CardAuthorization"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
