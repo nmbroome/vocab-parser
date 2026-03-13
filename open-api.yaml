@@ -1,0 +1,1560 @@
+openapi: 3.1.0
+info:
+  title: Cassandra Banking Core API
+  version: 1.0.0
+  description: |
+    BaaS core banking API for Pynthia Credit Union and white-labeled credit union instances.
+
+    This spec covers two API surfaces:
+    - **Fintech Instance API** — the BaaS API each fintech partner integrates against
+    - **Aggregator API** — cross-instance operations for payment origination, FBO positions, and BSA visibility
+
+    ## Architecture
+
+    Each fintech partner operates on a fully isolated instance (Blnk Deploy + Supabase + DuckDB).
+    The aggregator layer provides cross-fintech visibility for compliance and Fed settlement.
+
+    ## Authentication
+
+    **Fintech Instance API:** Bearer token scoped to `partner_id`, allowed endpoints, and rate limits.
+    **Aggregator API:** mTLS (transport) + short-lived JWT (application), 1-hour token expiry.
+
+    ## Idempotency
+
+    All mutating endpoints require an `Idempotency-Key` header. Keys never expire and are never reusable.
+    Same key + same args returns the cached response with `Idempotent-Replayed: true`.
+    Same key + different args returns `409 Conflict`.
+
+    ## Pagination
+
+    All list endpoints use transparent cursor-based pagination with `limit` and `after` parameters.
+
+    ## Environments
+
+    | Environment | Base URL |
+    |-------------|----------|
+    | Production  | `https://api.cassandra.bank/v1` |
+    | Sandbox     | `https://sandbox.api.cassandra.bank/v1` |
+    | Aggregator  | `https://aggregator.api.cassandra.bank/v1` |
+
+  contact:
+    name: Pynthia Engineering
+    email: engineering@pynthia.com
+  license:
+    name: Proprietary
+    identifier: LicenseRef-Proprietary
+
+servers:
+  - url: https://api.cassandra.bank/v1
+    description: Production — Fintech Instance API
+  - url: https://sandbox.api.cassandra.bank/v1
+    description: Sandbox — Fintech Instance API (production-matching validation)
+  - url: https://aggregator.api.cassandra.bank/v1
+    description: Aggregator API — cross-instance operations
+
+tags:
+  # --- Fintech Instance API ---
+  - name: Entities
+    description: |
+      Unified entity namespace with type-discriminated creation endpoints.
+      Entity types: `person`, `business`, `trust`, `joint`.
+      Joint accounts are modeled via `owners[]` on Account, not at the Entity level —
+      the `joint` entity type represents the relationship grouping itself.
+  - name: Accounts
+    description: Ledger accounts with 1:many account numbers.
+  - name: Account Numbers
+    description: 12-digit routable account numbers (3 prefix + 8 sequence + 1 Luhn check).
+  - name: ACH Transfers
+    description: Semi-transparent ACH with explicit approval gating.
+  - name: Wire Transfers
+    description: Domestic Fedwire with return request support.
+  - name: Book Transfers
+    description: Instant on-us transfers between accounts within the same instance.
+  - name: Cards
+    description: Card issuing via BIN sponsor adapter (Marqeta/Lithic).
+  - name: KYC Verifications
+    description: Multi-provider identity verification with partner-provided option.
+  - name: Bookkeeping
+    description: Shadow bookkeeping layer for 5300 account code tagging and FBO classification.
+  - name: Events
+    description: Webhook event delivery and backfill.
+  - name: Webhooks
+    description: Partner webhook endpoint management.
+  - name: Sandbox
+    description: Simulation endpoints for forced outcomes (sandbox environment only).
+  # --- Aggregator API ---
+  - name: Aggregator — Payments
+    description: Cross-instance payment origination (ACH, wire, RTP).
+  - name: Aggregator — FBO
+    description: FBO position queries and available balance checks.
+  - name: Aggregator — BSA
+    description: BSA alert queries and cross-fintech entity search.
+  - name: Aggregator — Auth
+    description: Instance authentication token management.
+
+# ============================================================================
+# Security
+# ============================================================================
+security:
+  - BearerToken: []
+
+components:
+
+  # --------------------------------------------------------------------------
+  # Security Schemes
+  # --------------------------------------------------------------------------
+  securitySchemes:
+    BearerToken:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: |
+        Partner API token scoped to `partner_id`, allowed endpoints, and rate tier.
+        Issued by Pynthia during partner onboarding.
+    AggregatorJWT:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Short-lived JWT (1-hour expiry) issued via `POST /auth/token`.
+        Transport secured by mTLS — JWT provides application-level identity.
+
+  # --------------------------------------------------------------------------
+  # Common Parameters
+  # --------------------------------------------------------------------------
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+        examples:
+          - "ik_a1b2c3d4e5f6"
+      description: |
+        Unique key for idempotent request processing. Never expires, never reusable.
+        Same key + same args → cached response with `Idempotent-Replayed: true` header.
+        Same key + different args → `409 Conflict`.
+
+    PaginationLimit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 25
+      description: Maximum number of results to return.
+
+    PaginationAfter:
+      name: after
+      in: query
+      required: false
+      schema:
+        type: string
+      description: |
+        Cursor for forward pagination. Pass the `next_after` value from the previous response.
+        Results are ordered by creation time (newest first).
+
+  # --------------------------------------------------------------------------
+  # Common Headers
+  # --------------------------------------------------------------------------
+  headers:
+    X-Request-Id:
+      schema:
+        type: string
+      description: Unique request identifier for support correlation.
+    X-API-Version:
+      schema:
+        type: string
+        examples:
+          - "1.0.0"
+      description: Current API version (semantic versioning).
+    X-RateLimit-Limit:
+      schema:
+        type: integer
+      description: Rate limit ceiling for this endpoint tier.
+    X-RateLimit-Remaining:
+      schema:
+        type: integer
+      description: Remaining requests in the current window.
+    X-RateLimit-Reset:
+      schema:
+        type: integer
+        format: unix-timestamp
+      description: Unix timestamp when the rate limit window resets.
+    X-RateLimit-Tier:
+      schema:
+        type: string
+        enum: [read, write, real_time, bulk]
+      description: Rate limit tier for this endpoint.
+    X-RateLimit-Warning:
+      schema:
+        type: string
+        enum: [approaching_limit]
+      description: Present when usage exceeds 80% of the limit.
+    Idempotent-Replayed:
+      schema:
+        type: boolean
+      description: |
+        Present and `true` when the response is a cached replay of a previous
+        identical idempotent request.
+
+  # --------------------------------------------------------------------------
+  # Responses
+  # --------------------------------------------------------------------------
+  responses:
+    BadRequest:
+      description: Validation error — one or more fields failed validation.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ValidationError"
+
+    Unauthorized:
+      description: Missing or invalid authentication token.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            status: 401
+            type: authentication_required
+            title: Authentication Required
+            detail: "Bearer token is missing or invalid."
+            doc_url: "https://api.cassandra.bank/docs/errors/authentication-required"
+            request_id: req_abc123def456
+
+    Forbidden:
+      description: Token valid but insufficient permissions for this operation.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+    NotFound:
+      description: Resource not found.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            status: 404
+            type: resource_not_found
+            title: Resource Not Found
+            detail: "Entity ent_abc123 does not exist."
+            doc_url: "https://api.cassandra.bank/docs/errors/resource-not-found"
+            request_id: req_abc123def456
+            resource_id: ent_abc123
+            resource_type: entity
+
+    Conflict:
+      description: Idempotency key reused with different arguments.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            status: 409
+            type: idempotency_key_reused
+            title: Idempotency Key Reused
+            detail: "Idempotency key ik_a1b2c3 was already used with different request parameters."
+            doc_url: "https://api.cassandra.bank/docs/errors/idempotency-key-reused"
+            request_id: req_abc123def456
+
+    TooManyRequests:
+      description: Rate limit exceeded.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+        X-RateLimit-Limit:
+          $ref: "#/components/headers/X-RateLimit-Limit"
+        X-RateLimit-Remaining:
+          $ref: "#/components/headers/X-RateLimit-Remaining"
+        X-RateLimit-Reset:
+          $ref: "#/components/headers/X-RateLimit-Reset"
+        X-RateLimit-Tier:
+          $ref: "#/components/headers/X-RateLimit-Tier"
+        Retry-After:
+          schema:
+            type: integer
+          description: Seconds until the rate limit resets.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+    InternalServerError:
+      description: Unexpected server error.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  # --------------------------------------------------------------------------
+  # Schemas
+  # --------------------------------------------------------------------------
+  schemas:
+
+    # ========================================================================
+    # Common
+    # ========================================================================
+    Error:
+      type: object
+      required: [status, type, title, detail, doc_url, request_id]
+      properties:
+        status:
+          type: integer
+          description: HTTP status code.
+        type:
+          type: string
+          description: Machine-readable error type identifier.
+        title:
+          type: string
+          description: Human-readable error title.
+        detail:
+          type: string
+          description: Human-readable explanation of the error.
+        doc_url:
+          type: string
+          format: uri
+          description: Link to documentation for this error type.
+        request_id:
+          type: string
+          description: Unique request identifier for support correlation.
+        resource_id:
+          type: string
+          description: ID of the resource that caused the error (when applicable).
+        resource_type:
+          type: string
+          description: Type of the resource that caused the error (when applicable).
+
+    ValidationError:
+      type: object
+      required: [status, type, errors]
+      properties:
+        status:
+          type: integer
+          const: 400
+        type:
+          type: string
+          const: validation_error
+        request_id:
+          type: string
+        doc_url:
+          type: string
+          format: uri
+        errors:
+          type: array
+          items:
+            type: object
+            required: [type, field, message]
+            properties:
+              type:
+                type: string
+                description: |
+                  Error classification.
+                enum:
+                  - required_field
+                  - invalid_format
+                  - invalid_value
+                  - invalid_length
+                  - mutually_exclusive
+                  - field_immutable
+              field:
+                type: string
+                description: JSON path to the offending field (e.g. `address.postal_code`).
+              message:
+                type: string
+                description: Human-readable explanation.
+
+    Pagination:
+      type: object
+      required: [has_more, limit]
+      properties:
+        has_more:
+          type: boolean
+          description: Whether additional results exist beyond this page.
+        next_after:
+          type: string
+          description: |
+            Cursor value to pass as the `after` query parameter for the next page.
+            Only present when `has_more` is `true`.
+        limit:
+          type: integer
+          description: The limit that was applied to this request.
+
+    # ========================================================================
+    # Address (shared value object)
+    # ========================================================================
+    Address:
+      type: object
+      required: [line1, city, state, postal_code, country]
+      properties:
+        line1:
+          type: string
+          maxLength: 100
+          description: Street address line 1.
+        line2:
+          type: string
+          maxLength: 100
+          description: Street address line 2 (apt, suite, unit, etc.).
+        city:
+          type: string
+          maxLength: 50
+        state:
+          type: string
+          minLength: 2
+          maxLength: 2
+          description: Two-letter US state or territory code (ISO 3166-2:US).
+        postal_code:
+          type: string
+          pattern: '^\d{5}(-\d{4})?$'
+          description: US ZIP code (5-digit or ZIP+4).
+        country:
+          type: string
+          minLength: 2
+          maxLength: 2
+          default: US
+          description: ISO 3166-1 alpha-2 country code.
+
+    # ========================================================================
+    # Entity — Unified Namespace (Decision 1, 7)
+    # ========================================================================
+
+    # --- Enums ---
+    EntityType:
+      type: string
+      enum: [person, business, trust, joint]
+      description: Entity type discriminator.
+
+    EntityStatus:
+      type: string
+      enum: [pending, active, disabled, archived]
+      description: |
+        Entity lifecycle state.
+        ```
+        PENDING → ACTIVE ↔ DISABLED → ARCHIVED
+        ```
+        - `pending` — Entity created, awaiting KYC/KYB verification.
+        - `active` — Verified and operational.
+        - `disabled` — Temporarily suspended (reversible).
+        - `archived` — Permanently closed (terminal).
+
+    LockType:
+      type: string
+      enum: [none, compliance, fraud, legal, admin]
+      description: |
+        Orthogonal lock applied independently of entity status.
+        When lock_type is not `none`, the entity is restricted from certain operations
+        even if status is `active`. Multiple lock types cannot stack — the most
+        restrictive active lock takes precedence at the application layer.
+
+    # --- Base Entity (read-only, returned in all responses) ---
+    EntityBase:
+      type: object
+      description: |
+        Fields common to all entity types. Present in every entity response.
+        Use the `type` discriminator to determine which type-specific fields are populated.
+      required:
+        - id
+        - type
+        - status
+        - lock_type
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          readOnly: true
+          pattern: '^ent_[a-zA-Z0-9]{20}$'
+          description: Unique entity identifier.
+          examples:
+            - ent_7kFb2mNqRsT9xLpW4vYz
+        type:
+          $ref: "#/components/schemas/EntityType"
+        status:
+          $ref: "#/components/schemas/EntityStatus"
+        lock_type:
+          $ref: "#/components/schemas/LockType"
+        kyc_status:
+          type: string
+          enum: [not_started, pending, approved, denied, expired]
+          readOnly: true
+          description: Current verification status (driven by KYC/KYB provider integration).
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+          description: |
+            Arbitrary key-value pairs for partner use. Keys max 40 chars, values max 500 chars.
+            Not used by the control engine or compliance reporting.
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    # --- Person ---
+    PersonFields:
+      type: object
+      description: "Fields specific to type `person`."
+      required:
+        - name_first
+        - name_last
+        - date_of_birth
+        - ssn
+        - address
+      properties:
+        name_first:
+          type: string
+          maxLength: 50
+        name_last:
+          type: string
+          maxLength: 50
+        name_middle:
+          type: string
+          maxLength: 50
+        name_suffix:
+          type: string
+          maxLength: 10
+          description: e.g., Jr., Sr., III.
+        date_of_birth:
+          type: string
+          format: date
+          description: ISO 8601 date (YYYY-MM-DD). Must be at least 18 years old.
+        ssn:
+          type: string
+          pattern: '^\d{3}-\d{2}-\d{4}$'
+          description: |
+            Social Security Number. Write-once — cannot be updated after creation.
+            Returned masked in responses (`***-**-6789`) except in compliance-scoped requests.
+          x-pii: true
+          x-write-once: true
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        phone:
+          type: string
+          pattern: '^\+1\d{10}$'
+          description: US phone number in E.164 format.
+        address:
+          $ref: "#/components/schemas/Address"
+        citizenship_country:
+          type: string
+          minLength: 2
+          maxLength: 2
+          default: US
+          description: ISO 3166-1 alpha-2. Required for CDD (CD-01).
+
+    CreatePerson:
+      allOf:
+        - $ref: "#/components/schemas/PersonFields"
+        - type: object
+          properties:
+            metadata:
+              type: object
+              additionalProperties:
+                type: string
+              maxProperties: 50
+
+    Person:
+      description: A natural person entity.
+      allOf:
+        - $ref: "#/components/schemas/EntityBase"
+        - $ref: "#/components/schemas/PersonFields"
+        - type: object
+          properties:
+            type:
+              const: person
+
+    # --- Business ---
+    BeneficialOwner:
+      type: object
+      description: |
+        A person with ≥25% ownership in the business (FinCEN threshold).
+        References an existing person entity.
+      required:
+        - entity_id
+        - ownership_percentage
+        - title
+      properties:
+        entity_id:
+          type: string
+          description: ID of the person entity representing this beneficial owner.
+        ownership_percentage:
+          type: number
+          format: float
+          minimum: 25
+          maximum: 100
+          description: Ownership percentage (must be ≥ 25% to qualify as beneficial owner).
+        title:
+          type: string
+          maxLength: 100
+          description: Role or title at the business (e.g., "CEO", "Managing Member").
+        is_control_person:
+          type: boolean
+          default: false
+          description: Whether this person has significant control over the business.
+
+    BusinessFields:
+      type: object
+      description: "Fields specific to type `business`."
+      required:
+        - legal_name
+        - ein
+        - business_type
+        - formation_date
+        - formation_state
+        - address
+        - beneficial_owners
+      properties:
+        legal_name:
+          type: string
+          maxLength: 200
+        dba_name:
+          type: string
+          maxLength: 200
+          description: Doing Business As name, if different from legal name.
+        ein:
+          type: string
+          pattern: '^\d{2}-\d{7}$'
+          description: |
+            Employer Identification Number (XX-XXXXXXX).
+            Write-once — cannot be updated after creation.
+            Returned masked in responses (`**-***4567`) except in compliance-scoped requests.
+          x-pii: true
+          x-write-once: true
+        business_type:
+          type: string
+          enum:
+            - sole_proprietorship
+            - partnership
+            - llc
+            - corporation
+            - s_corporation
+            - nonprofit
+            - government
+            - other
+        naics_code:
+          type: string
+          pattern: '^\d{6}$'
+          description: 6-digit NAICS industry classification code.
+        formation_date:
+          type: string
+          format: date
+        formation_state:
+          type: string
+          minLength: 2
+          maxLength: 2
+          description: Two-letter US state code where the business was formed.
+        address:
+          $ref: "#/components/schemas/Address"
+        phone:
+          type: string
+          pattern: '^\+1\d{10}$'
+        website:
+          type: string
+          format: uri
+          maxLength: 500
+        beneficial_owners:
+          type: array
+          items:
+            $ref: "#/components/schemas/BeneficialOwner"
+          minItems: 1
+          description: |
+            All persons with ≥25% ownership. At least one beneficial owner is required
+            per FinCEN beneficial ownership rule. Each must reference an existing person entity.
+
+    CreateBusiness:
+      allOf:
+        - $ref: "#/components/schemas/BusinessFields"
+        - type: object
+          properties:
+            metadata:
+              type: object
+              additionalProperties:
+                type: string
+              maxProperties: 50
+
+    Business:
+      description: A business entity (LLC, corporation, etc.).
+      allOf:
+        - $ref: "#/components/schemas/EntityBase"
+        - $ref: "#/components/schemas/BusinessFields"
+        - type: object
+          properties:
+            type:
+              const: business
+
+    # --- Trust ---
+    TrustRole:
+      type: object
+      description: A person associated with the trust in a specific role.
+      required:
+        - entity_id
+        - role
+      properties:
+        entity_id:
+          type: string
+          description: ID of the person entity.
+        role:
+          type: string
+          enum: [trustee, beneficiary, grantor, successor_trustee, protector]
+          description: The person's role in the trust.
+
+    TrustFields:
+      type: object
+      description: "Fields specific to type `trust`."
+      required:
+        - trust_name
+        - trust_type
+        - formation_date
+        - ein
+        - address
+        - associated_persons
+      properties:
+        trust_name:
+          type: string
+          maxLength: 200
+        trust_type:
+          type: string
+          enum: [revocable, irrevocable]
+        formation_date:
+          type: string
+          format: date
+        ein:
+          type: string
+          pattern: '^\d{2}-\d{7}$'
+          description: Trust EIN. Revocable trusts may use the grantor's SSN instead — in that case, provide the grantor's SSN here.
+          x-pii: true
+          x-write-once: true
+        address:
+          $ref: "#/components/schemas/Address"
+        associated_persons:
+          type: array
+          items:
+            $ref: "#/components/schemas/TrustRole"
+          minItems: 1
+          description: |
+            All persons associated with the trust. Must include at least one trustee
+            and at least one grantor. Each must reference an existing person entity.
+
+    CreateTrust:
+      allOf:
+        - $ref: "#/components/schemas/TrustFields"
+        - type: object
+          properties:
+            metadata:
+              type: object
+              additionalProperties:
+                type: string
+              maxProperties: 50
+
+    Trust:
+      description: A trust entity (revocable or irrevocable).
+      allOf:
+        - $ref: "#/components/schemas/EntityBase"
+        - $ref: "#/components/schemas/TrustFields"
+        - type: object
+          properties:
+            type:
+              const: trust
+
+    # --- Joint ---
+    JointFields:
+      type: object
+      description: |
+        Fields specific to `type: joint`. Represents a joint relationship between
+        two or more persons. The actual joint account ownership is modeled via the
+        `owners[]` array on Account — the joint entity groups the persons for
+        CDD and BSA purposes.
+      required:
+        - joint_type
+        - members
+      properties:
+        joint_type:
+          type: string
+          enum: [joint_tenants_with_rights_of_survivorship, tenants_in_common]
+          description: Legal structure of the joint relationship.
+        members:
+          type: array
+          items:
+            type: object
+            required: [entity_id]
+            properties:
+              entity_id:
+                type: string
+                description: ID of a person entity in this joint relationship.
+          minItems: 2
+          maxItems: 10
+          description: |
+            Person entities in this joint relationship. All members must have
+            `kyc_status: approved` before the joint entity can become `active`.
+
+    CreateJoint:
+      allOf:
+        - $ref: "#/components/schemas/JointFields"
+        - type: object
+          properties:
+            metadata:
+              type: object
+              additionalProperties:
+                type: string
+              maxProperties: 50
+
+    Joint:
+      description: A joint entity representing a relationship between two or more persons.
+      allOf:
+        - $ref: "#/components/schemas/EntityBase"
+        - $ref: "#/components/schemas/JointFields"
+        - type: object
+          properties:
+            type:
+              const: joint
+
+    # --- Polymorphic Entity (discriminated union for list/get responses) ---
+    Entity:
+      description: |
+        Discriminated union of all entity types. Use the `type` field to determine
+        which type-specific fields are present.
+      oneOf:
+        - $ref: "#/components/schemas/Person"
+        - $ref: "#/components/schemas/Business"
+        - $ref: "#/components/schemas/Trust"
+        - $ref: "#/components/schemas/Joint"
+      discriminator:
+        propertyName: type
+        mapping:
+          person: "#/components/schemas/Person"
+          business: "#/components/schemas/Business"
+          trust: "#/components/schemas/Trust"
+          joint: "#/components/schemas/Joint"
+
+    # --- Update Schemas (PATCH — partial updates, immutable fields excluded) ---
+    UpdatePerson:
+      type: object
+      description: |
+        Partial update for a person entity. Only provided fields are updated.
+        Write-once fields (`ssn`) cannot be modified. Status transitions use
+        dedicated action endpoints.
+      properties:
+        name_first:
+          type: string
+          maxLength: 50
+        name_last:
+          type: string
+          maxLength: 50
+        name_middle:
+          type: string
+          maxLength: 50
+        name_suffix:
+          type: string
+          maxLength: 10
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        phone:
+          type: string
+          pattern: '^\+1\d{10}$'
+        address:
+          $ref: "#/components/schemas/Address"
+        citizenship_country:
+          type: string
+          minLength: 2
+          maxLength: 2
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+
+    UpdateBusiness:
+      type: object
+      description: |
+        Partial update for a business entity. Write-once fields (`ein`) cannot be modified.
+      properties:
+        legal_name:
+          type: string
+          maxLength: 200
+        dba_name:
+          type: string
+          maxLength: 200
+        business_type:
+          type: string
+          enum:
+            - sole_proprietorship
+            - partnership
+            - llc
+            - corporation
+            - s_corporation
+            - nonprofit
+            - government
+            - other
+        naics_code:
+          type: string
+          pattern: '^\d{6}$'
+        address:
+          $ref: "#/components/schemas/Address"
+        phone:
+          type: string
+          pattern: '^\+1\d{10}$'
+        website:
+          type: string
+          format: uri
+          maxLength: 500
+        beneficial_owners:
+          type: array
+          items:
+            $ref: "#/components/schemas/BeneficialOwner"
+          minItems: 1
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+
+    UpdateTrust:
+      type: object
+      description: |
+        Partial update for a trust entity. Write-once fields (`ein`) cannot be modified.
+      properties:
+        trust_name:
+          type: string
+          maxLength: 200
+        address:
+          $ref: "#/components/schemas/Address"
+        associated_persons:
+          type: array
+          items:
+            $ref: "#/components/schemas/TrustRole"
+          minItems: 1
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+
+    UpdateJoint:
+      type: object
+      description: |
+        Partial update for a joint entity. Members can be added or removed
+        (minimum 2 members enforced).
+      properties:
+        members:
+          type: array
+          items:
+            type: object
+            required: [entity_id]
+            properties:
+              entity_id:
+                type: string
+          minItems: 2
+          maxItems: 10
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          maxProperties: 50
+
+    # --- Entity List Response ---
+    EntityList:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Entity"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    # --- Status Transition Request ---
+    EntityStatusTransition:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [activate, disable, archive]
+          description: |
+            Requested status transition.
+            - `activate` — Move from `pending` or `disabled` to `active`. Requires `kyc_status: approved`.
+            - `disable` — Move from `active` to `disabled`. Reversible.
+            - `archive` — Move from `disabled` to `archived`. Terminal, irreversible.
+        reason:
+          type: string
+          maxLength: 500
+          description: Required for `disable` and `archive` actions. Recorded in audit log.
+
+    # --- Lock Request ---
+    EntityLockUpdate:
+      type: object
+      required: [lock_type]
+      properties:
+        lock_type:
+          $ref: "#/components/schemas/LockType"
+        reason:
+          type: string
+          maxLength: 500
+          description: Required when lock_type is not `none`. Recorded in audit log.
+
+# ============================================================================
+# Paths — Entity
+# ============================================================================
+paths:
+
+  # --------------------------------------------------------------------------
+  # Unified entity namespace — list & get
+  # --------------------------------------------------------------------------
+  /entities:
+    get:
+      operationId: listEntities
+      summary: List entities
+      description: |
+        Returns a paginated list of entities. Supports filtering by type, status, and lock type.
+        Results are ordered by `created_at` descending (newest first).
+      tags: [Entities]
+      parameters:
+        - $ref: "#/components/parameters/PaginationLimit"
+        - $ref: "#/components/parameters/PaginationAfter"
+        - name: type
+          in: query
+          schema:
+            $ref: "#/components/schemas/EntityType"
+          description: Filter by entity type.
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/EntityStatus"
+          description: Filter by entity status.
+        - name: lock_type
+          in: query
+          schema:
+            $ref: "#/components/schemas/LockType"
+          description: Filter by lock type.
+        - name: created_after
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Only return entities created after this timestamp.
+        - name: created_before
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Only return entities created before this timestamp.
+      responses:
+        "200":
+          description: Paginated list of entities.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-API-Version:
+              $ref: "#/components/headers/X-API-Version"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+            X-RateLimit-Tier:
+              $ref: "#/components/headers/X-RateLimit-Tier"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EntityList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /entities/{entity_id}:
+    get:
+      operationId: getEntity
+      summary: Retrieve an entity
+      description: |
+        Returns a single entity by ID. The response schema varies by `type` —
+        use the discriminator to determine which type-specific fields are present.
+      tags: [Entities]
+      parameters:
+        - name: entity_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The entity.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Entity"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # --------------------------------------------------------------------------
+  # Type-specific creation endpoints
+  # --------------------------------------------------------------------------
+  /entities/person:
+    post:
+      operationId: createPerson
+      summary: Create a person entity
+      description: |
+        Creates a new person entity in `pending` status. The entity must pass KYC
+        verification before it can be activated.
+
+        **Control gates:** CD-01 (CIP Data Collection), BA-05 (OFAC Screening).
+        OFAC screening runs automatically on creation — if a match is found, the entity
+        is created with `lock_type: compliance` and a compliance officer review is required.
+      tags: [Entities]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePerson"
+      responses:
+        "201":
+          description: Person entity created.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            Idempotent-Replayed:
+              $ref: "#/components/headers/Idempotent-Replayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Person"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /entities/business:
+    post:
+      operationId: createBusiness
+      summary: Create a business entity
+      description: |
+        Creates a new business entity in `pending` status. All beneficial owners
+        (persons with ≥25% ownership) must already exist as person entities.
+
+        **Control gates:** CD-02 (Business CIP), CD-10 (Beneficial Ownership), BA-05 (OFAC Screening).
+        OFAC screening runs against the business name, EIN, and all beneficial owners.
+      tags: [Entities]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateBusiness"
+      responses:
+        "201":
+          description: Business entity created.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            Idempotent-Replayed:
+              $ref: "#/components/headers/Idempotent-Replayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Business"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /entities/trust:
+    post:
+      operationId: createTrust
+      summary: Create a trust entity
+      description: |
+        Creates a new trust entity in `pending` status. All associated persons
+        (trustees, grantors, beneficiaries) must already exist as person entities.
+
+        **Control gates:** CD-03 (Trust CIP), BA-05 (OFAC Screening).
+      tags: [Entities]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTrust"
+      responses:
+        "201":
+          description: Trust entity created.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            Idempotent-Replayed:
+              $ref: "#/components/headers/Idempotent-Replayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Trust"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /entities/joint:
+    post:
+      operationId: createJoint
+      summary: Create a joint entity
+      description: |
+        Creates a new joint entity in `pending` status. All member persons must
+        already exist as person entities. The joint entity becomes `active` only
+        after all members have `kyc_status: approved`.
+
+        **Control gates:** BA-05 (OFAC Screening on all members).
+      tags: [Entities]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateJoint"
+      responses:
+        "201":
+          description: Joint entity created.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            Idempotent-Replayed:
+              $ref: "#/components/headers/Idempotent-Replayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Joint"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  # --------------------------------------------------------------------------
+  # Type-specific update endpoints (PATCH)
+  # --------------------------------------------------------------------------
+  /entities/person/{entity_id}:
+    patch:
+      operationId: updatePerson
+      summary: Update a person entity
+      description: |
+        Partially updates a person entity. Only provided fields are modified.
+        Write-once fields (`ssn`, `date_of_birth`) cannot be changed after creation.
+        Status transitions use `POST /entities/{entity_id}/status`.
+
+        **Control gates:** CD-06 (CDD Refresh) may trigger re-verification if
+        address or name changes are detected.
+      tags: [Entities]
+      parameters:
+        - name: entity_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdatePerson"
+      responses:
+        "200":
+          description: Person entity updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Person"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /entities/business/{entity_id}:
+    patch:
+      operationId: updateBusiness
+      summary: Update a business entity
+      description: |
+        Partially updates a business entity. Write-once fields (`ein`) cannot be changed.
+
+        **Control gates:** CD-10 (Beneficial Ownership) re-evaluated if `beneficial_owners` changes.
+      tags: [Entities]
+      parameters:
+        - name: entity_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateBusiness"
+      responses:
+        "200":
+          description: Business entity updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Business"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /entities/trust/{entity_id}:
+    patch:
+      operationId: updateTrust
+      summary: Update a trust entity
+      description: |
+        Partially updates a trust entity. Write-once fields (`ein`) cannot be changed.
+      tags: [Entities]
+      parameters:
+        - name: entity_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateTrust"
+      responses:
+        "200":
+          description: Trust entity updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Trust"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /entities/joint/{entity_id}:
+    patch:
+      operationId: updateJoint
+      summary: Update a joint entity
+      description: |
+        Updates the members of a joint entity. Minimum 2 members enforced.
+      tags: [Entities]
+      parameters:
+        - name: entity_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateJoint"
+      responses:
+        "200":
+          description: Joint entity updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Joint"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  # --------------------------------------------------------------------------
+  # Entity actions — status transitions and locks
+  # --------------------------------------------------------------------------
+  /entities/{entity_id}/status:
+    post:
+      operationId: transitionEntityStatus
+      summary: Transition entity status
+      description: |
+        Transitions an entity's lifecycle status. Valid transitions:
+        - `pending` → `active` (requires `kyc_status: approved`)
+        - `active` → `disabled` (requires `reason`)
+        - `disabled` → `active`
+        - `disabled` → `archived` (terminal, requires `reason`)
+
+        Events emitted: `entity.activated`, `entity.disabled`, `entity.archived`.
+
+        **Control gates:** Activation blocked if BA-05 (OFAC) has a pending match.
+      tags: [Entities]
+      parameters:
+        - name: entity_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EntityStatusTransition"
+      responses:
+        "200":
+          description: Status transition applied.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Entity"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            Transition not allowed from the current state, or a compliance control
+            is blocking the transition.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                status: 409
+                type: invalid_status_transition
+                title: Invalid Status Transition
+                detail: "Cannot activate entity ent_abc123: kyc_status is 'pending', must be 'approved'."
+                doc_url: "https://api.cassandra.bank/docs/errors/invalid-status-transition"
+                request_id: req_abc123def456
+                resource_id: ent_abc123
+                resource_type: entity
+
+  /entities/{entity_id}/lock:
+    put:
+      operationId: updateEntityLock
+      summary: Update entity lock
+      description: |
+        Sets or removes the orthogonal lock on an entity. Locks restrict operations
+        independently of entity status — an entity can be `active` but locked.
+
+        Lock types:
+        - `none` — No lock (removes any existing lock).
+        - `compliance` — Set by control engine (e.g., OFAC match). Cannot be removed via API — requires compliance officer action.
+        - `fraud` — Fraud investigation hold.
+        - `legal` — Legal/subpoena hold.
+        - `admin` — Administrative hold.
+
+        Events emitted: `entity.locked`, `entity.unlocked`.
+
+        **Note:** `compliance` locks set by the control engine (e.g., BA-05 OFAC match)
+        cannot be removed via this endpoint. They require resolution through the
+        compliance review workflow.
+      tags: [Entities]
+      parameters:
+        - name: entity_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EntityLockUpdate"
+      responses:
+        "200":
+          description: Lock updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Entity"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Cannot modify a compliance lock set by the control engine.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
